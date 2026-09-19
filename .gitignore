@@ -1,0 +1,22 @@
+# ambiente Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# frontend: dependencias e caches de build (o frontend/dist/ VAI junto,
+# para quem baixar rodar sem instalar Node - ver frontend/.gitignore)
+frontend/node_modules/
+*.tsbuildinfo
+
+# editor e ferramentas locais
+.vscode/
+.idea/
+.claude/
+
+# saidas geradas (refaca com gerar_figuras.py / analise_dataset.py)
+figuras/
+
+# diversos
+*.log
+.env

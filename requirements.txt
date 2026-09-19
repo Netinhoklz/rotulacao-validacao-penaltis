@@ -1,0 +1,9 @@
+# Dependências do Rotulador de Pênaltis (versão React)
+# Instale com:  pip install -r requirements.txt
+
+opencv-python>=4.8.0    # Leitura/escrita de vídeo e frames
+numpy>=1.24.0           # Manipulação de arrays de imagem
+fastapi>=0.111.0        # Backend HTTP para o frontend React
+uvicorn[standard]>=0.29 # Servidor ASGI para o FastAPI
+pydantic>=2.0.0         # Validação de dados (incluso no FastAPI)
+flask>=3.0.0            # Servidor das ferramentas de revisão (run_revisor.py, validador_web.py)
