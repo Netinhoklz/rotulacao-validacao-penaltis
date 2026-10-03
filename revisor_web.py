@@ -21,7 +21,6 @@ O que da para fazer
       status, competicao, camera, gol/nao-gol e nome do video
     - assistir ao lance no video original, no instante do chute, em camera lenta
     - andar frame a frame (frames exatos, decodificados pelo OpenCV)
-    - ver a tira de frames em volta do chute (onde a bola foi, de relance)
     - comparar com o clip recortado e com os PNGs exportados
     - clicar na grade do gol para corrigir a regiao, trocar camera, marcar
       gol/nao-gol, reposicionar inicio/chute, anotar observacao
@@ -38,6 +37,8 @@ import base64
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import threading
 import webbrowser
 from typing import Any, Optional
@@ -68,14 +69,54 @@ def _erro(msg: str, code: int = 400):
     return jsonify({"erro": msg}), code
 
 
+_FIM_CONFRONTO = (r"(?=\s+(?:MELHORES\s+MOMENTOS|GOLS|COMPACTO|"
+                  r"HIGHLIGHTS|RESUMO|P[ÊE]NALTIS|JOGO\s+COMPLETO|AO\s+VIVO|"
+                  r"\d+\s+RO(?:DADA)?|BRASILEIR[ÃA]O|COPA\s+DO\s+BRASIL)\b|$)")
+_JOGO_RE = re.compile(
+    r"^(?P<casa>.+?)\s+(?P<gols_casa>\d{1,2})\s*[xX×]\s*"
+    r"(?P<gols_fora>\d{1,2})\s+(?P<fora>.+?)" + _FIM_CONFRONTO,
+    re.IGNORECASE,
+)
+_DISPUTA_RE = re.compile(
+    r"^(?P<casa>.+?)\s+(?P<gols_casa>\d{1,2})\s+(?P<pen_casa>\d{1,2})"
+    r"\s*[xX×]\s*(?P<pen_fora>\d{1,2})\s+(?P<gols_fora>\d{1,2})"
+    r"\s+(?P<fora>.+?)" + _FIM_CONFRONTO, re.IGNORECASE,
+)
+
+
+def _jogo_do_arquivo(nome: str) -> dict[str, str]:
+    """Exibe o confronto do nome do vídeo sem inventar dados ausentes."""
+    arquivo = os.path.basename(nome)
+    stem = re.sub(r"\.f\d+$", "", os.path.splitext(arquivo)[0], flags=re.IGNORECASE)
+    stem = " ".join(stem.replace("_", " ").split())
+    disputa = _DISPUTA_RE.match(stem)
+    if disputa:
+        g = disputa.groupdict()
+        casa = re.sub(r"^DISPUTA DE PENALTIS\s+", "", g["casa"], flags=re.IGNORECASE)
+        jogo = f"{casa} {g['gols_casa']} × {g['gols_fora']} {g['fora']}"
+        detalhe = f"Pênaltis: {g['pen_casa']} × {g['pen_fora']}"
+        sufixo = stem[disputa.end():].strip()
+        return {"jogo": jogo, "detalhe_video": detalhe + (f" · {sufixo}" if sufixo else "")}
+    achado = _JOGO_RE.match(stem)
+    if not achado:
+        return {"jogo": stem or arquivo, "detalhe_video": ""}
+    g = achado.groupdict()
+    if g["casa"].split()[-1].isdigit() or g["fora"].split()[0].isdigit():
+        return {"jogo": stem or arquivo, "detalhe_video": ""}
+    jogo = f"{g['casa']} {g['gols_casa']} × {g['gols_fora']} {g['fora']}"
+    return {"jogo": jogo, "detalhe_video": stem[achado.end():].strip()}
+
+
 def _item(r: dict) -> dict:
     """Versao enxuta de um rotulo, para a lista da esquerda."""
     a = r["atual"]
     return {
         "uid":          r["uid"],
         "video_file":   a.get("video_file", ""),
+        **_jogo_do_arquivo(a.get("video_file", "")),
         "penalty_id":   a.get("penalty_id", ""),
         "competicao":   r["competicao"],
+        "competicao_label": r["competicao_label"],
         "region":       a.get("region", ""),
         "region_label": a.get("region_label", ""),
         "camera_type":  a.get("camera_type", ""),
@@ -87,10 +128,38 @@ def _item(r: dict) -> dict:
     }
 
 
+_fps_video: dict[str, float] = {}
+
+
+def _fps_do_video(caminho: Optional[str]) -> float:
+    """FPS lido do proprio video.
+
+    O fps do rotulo vem de uma divisao entre tempos arredondados a 4 casas
+    (frames / segundos). Em cobrancas curtas o erro relativo e grande e, ao
+    multiplicar por um frame na casa dos milhares, vira frame inteiro de
+    desvio na hora de buscar no <video>. A taxa do container nao tem esse
+    problema. Devolve 0.0 quando nao da para ler.
+    """
+    if not caminho:
+        return 0.0
+    if caminho not in _fps_video:
+        fps = 0.0
+        try:
+            import cv2
+            cap = cv2.VideoCapture(caminho)
+            if cap.isOpened():
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            cap.release()
+        except Exception:
+            fps = 0.0
+        _fps_video[caminho] = fps if 5.0 < fps < 240.0 else 0.0
+    return _fps_video[caminho]
+
+
 def _detalhe(r: dict, base: R.Base) -> dict:
     a, o = r["atual"], r["original"]
-    fps = R.fps_da_linha(a)
     video_path = indice().get(a.get("video_file", ""))
+    fps = _fps_do_video(video_path) or R.fps_da_linha(a)
     t_chute = R.num(a, "chute_time_s")
 
     # Outros rotulos do mesmo video proximos no tempo: quase sempre replays do
@@ -110,7 +179,7 @@ def _detalhe(r: dict, base: R.Base) -> dict:
     return {
         "reg": {
             **_item(r),
-            "competicao_label": r["competicao_label"],
+            "source_folder": a.get("source_folder", ""),
             "inicio_frame":  int(R.num(a, "inicio_frame")),
             "chute_frame":   int(R.num(a, "chute_frame")),
             "inicio_time_s": round(R.num(a, "inicio_time_s"), 3),
@@ -218,7 +287,120 @@ def api_editar():
         return _erro(str(e))
     except (KeyError, TypeError, ValueError) as e:
         return _erro(f"requisicao invalida: {e}")
+    # inicio/final mudaram -> clip e frames exportados ficam defasados; regrava
+    if any(m.startswith(("inicio_frame ", "chute_frame ")) for m in mudancas):
+        mudancas += _regerar_midia(d["uid"])
     return jsonify({"ok": True, "mudancas": mudancas})
+
+
+# ---------------------------------------------------------------------------
+# Regeracao do clip e dos frames exportados a partir do frame corrigido
+# ---------------------------------------------------------------------------
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
+
+
+def _dentro_da_saida(caminho: str) -> bool:
+    caminho = os.path.abspath(caminho or "")
+    return bool(caminho) and caminho.startswith(paths().output_base + os.sep)
+
+
+def _cortar_clip(video: str, ini: int, fim: int, fps: float, destino: str) -> bool:
+    """Clip [ini, fim] inclusivo, cortado pelo MEIO dos frames.
+
+    -ss em (ini-0.5)/fps mantem o frame ini e derruba o anterior; dai em
+    diante -frames:v conta exatamente fim-ini+1 frames. Cortar por tempo
+    (-t) deixava o clip ora 1 frame curto, ora 1 frame longo.
+    """
+    tmp = destino + ".tmp.mp4"
+    ok = False
+    if FFMPEG_BIN:
+        cmd = [FFMPEG_BIN, "-y", "-loglevel", "error",
+               "-ss", f"{max(ini - 0.5, 0) / fps:.4f}", "-i", video,
+               "-frames:v", str(fim - ini + 1), "-an",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart", tmp]
+        try:
+            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ok = r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+    if not ok:                                   # sem ffmpeg: OpenCV, frame a frame
+        cv2 = _cv2()
+        cap = cv2.VideoCapture(video)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, ini)
+        n = ini
+        while n <= fim:
+            lido, img = cap.read()
+            if not lido:
+                break
+            wr.write(img)
+            n += 1
+        cap.release()
+        wr.release()
+        ok = n > ini and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
+    if ok:
+        os.replace(tmp, destino)
+    elif os.path.isfile(tmp):
+        os.remove(tmp)
+    return ok
+
+
+def _gravar_frame(video: str, n: int, destino: str) -> bool:
+    cv2 = _cv2()
+    with _lock:
+        cap = cv2.VideoCapture(video)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, n)
+        ok, img = cap.read()
+        cap.release()
+    if not ok:
+        return False
+    tmp = destino + ".tmp.jpg"
+    if not cv2.imwrite(tmp, img, [cv2.IMWRITE_JPEG_QUALITY, 92]):
+        return False
+    os.replace(tmp, destino)
+    return True
+
+
+def _regerar_midia(uid: str) -> list[str]:
+    """Regrava clip e frames _inicio/_chute do rotulo com os frames atuais.
+
+    Escreve nos caminhos que o proprio rotulo aponta (clips/ e frames/ da
+    saida), nunca no video original nem no labels.csv. Devolve o que fez,
+    para entrar na mesma lista de mudancas do save.
+    """
+    try:
+        a = R.carregar(paths()).get(uid)["atual"]
+    except R.RevisaoErro:
+        return ["midia nao regerada: rotulo nao encontrado"]
+    video = indice().get(a.get("video_file", ""))
+    if not video or not os.path.isfile(video):
+        return ["midia nao regerada: video original fora do indice"]
+    ini, fim = int(R.num(a, "inicio_frame")), int(R.num(a, "chute_frame"))
+    fps = _fps_do_video(video) or R.fps_da_linha(a)
+
+    feito, falhou = [], []
+    for rotulo, campo, acao in (
+        ("clip",         "clip_path",         lambda d: _cortar_clip(video, ini, fim, fps, d)),
+        ("frame inicio", "frame_inicio_path", lambda d: _gravar_frame(video, ini, d)),
+        ("frame chute",  "frame_chute_path",  lambda d: _gravar_frame(video, fim, d)),
+    ):
+        destino = a.get(campo, "")
+        if not _dentro_da_saida(destino):
+            continue                             # rotulo sem midia exportada
+        try:
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            (feito if acao(destino) else falhou).append(rotulo)
+        except Exception:
+            falhou.append(rotulo)
+    out = []
+    if feito:
+        out.append("regravado: " + ", ".join(feito))
+    if falhou:
+        out.append("FALHOU ao regravar: " + ", ".join(falhou))
+    return out
 
 
 @app.post("/api/aprovar")
@@ -268,7 +450,7 @@ def api_exportar():
 
 
 # ---------------------------------------------------------------------------
-# Midia: video original (com Range), frame exato, tira de frames, clip e PNGs
+# Midia: video original (com Range), frame exato, clip e PNGs
 # ---------------------------------------------------------------------------
 def _servir_com_range(caminho: str) -> Response:
     """
@@ -315,7 +497,6 @@ def midia_video():
 
 
 _frame_cache: dict[tuple, bytes] = {}
-_tira_cache: dict[tuple, list] = {}
 _lock = threading.Lock()           # VideoCapture nao e thread-safe
 
 
@@ -373,64 +554,6 @@ def midia_frame():
         _frame_cache.clear()
     _frame_cache[chave] = dados
     return Response(dados, mimetype="image/jpeg")
-
-
-@app.get("/midia/tira")
-def midia_tira():
-    """
-    Tira de frames em volta do chute, numa unica requisicao.
-
-    Abrir um VideoCapture por miniatura seria lento demais (seek + decode a
-    cada chamada); aqui a captura abre uma vez, le sequencialmente e devolve
-    todas as miniaturas juntas. E a leitura que mais resolve na validacao:
-    da para ver a bola saindo do pe e onde ela termina.
-    """
-    nome = request.args.get("nome", "")
-    try:
-        centro = max(int(request.args.get("centro", 0)), 0)
-        antes  = min(max(int(request.args.get("antes", 4)), 0), 30)
-        depois = min(max(int(request.args.get("depois", 14)), 0), 60)
-        passo  = min(max(int(request.args.get("passo", 2)), 1), 30)
-        fps    = float(request.args.get("fps", R.FPS_ESPERADO)) or R.FPS_ESPERADO
-    except ValueError:
-        abort(400)
-    caminho = _caminho_do_video(nome)
-
-    chave = (nome, centro, antes, depois, passo)
-    if chave in _tira_cache:
-        return jsonify({"frames": _tira_cache[chave]})
-
-    cv2 = _cv2()
-    ini = max(centro - antes * passo, 0)
-    fim = centro + depois * passo
-    quero = list(range(ini, fim + 1, passo))
-
-    with _lock:
-        cap = cv2.VideoCapture(caminho)
-        if not cap.isOpened():
-            abort(500)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, ini)
-        frames, n = [], ini
-        alvo = set(quero)
-        while n <= fim:
-            ok, img = cap.read()
-            if not ok:
-                break
-            if n in alvo:
-                frames.append({
-                    "n": n,
-                    "t": round(n / fps, 2),
-                    "chute": n == centro,
-                    "img": "data:image/jpeg;base64," +
-                           base64.b64encode(_jpeg(cv2, img, largura=260, q=72)).decode(),
-                })
-            n += 1
-        cap.release()
-
-    if len(_tira_cache) > 40:
-        _tira_cache.clear()
-    _tira_cache[chave] = frames
-    return jsonify({"frames": frames})
 
 
 def _arquivo_do_registro(uid: str, campo: str) -> str:
@@ -531,14 +654,46 @@ PAGINA = r"""<!doctype html>
   .item .reg.gol{color:var(--azul)}
   .item .vid{color:var(--txt2);font-size:11px;white-space:nowrap;overflow:hidden;
              text-overflow:ellipsis;margin-top:2px}
+  .item .jogo{font-size:13px;font-weight:650;line-height:1.3;margin-top:5px;
+              overflow-wrap:anywhere}
+  .item .vid{margin-top:3px}
 
   /* ---- palco ---- */
-  .abas{display:flex;gap:4px;margin-bottom:8px}
-  .abas button{font-size:12px;padding:5px 10px}
-  .abas button.on{background:var(--azul);color:#11111b;border-color:var(--azul);font-weight:600}
+  .jogo-cab{border:1px solid var(--borda);border-left:4px solid var(--azul);
+            background:var(--painel);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+  .jogo-cab h1{font-size:21px;line-height:1.2;margin:0 0 7px;overflow-wrap:anywhere}
+  .jogo-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+  .jogo-arquivo{font-size:11px;color:var(--txt2);margin-top:7px;overflow-wrap:anywhere}
+  /* ---- passo a passo ---- */
+  .passo-cab{background:var(--painel);border:1px solid var(--borda);border-radius:9px;
+             padding:10px 14px;margin-bottom:8px}
+  .passos{display:flex;gap:6px;margin-bottom:9px}
+  .passos button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+                 font-size:11px;padding:6px 4px;color:var(--txt2)}
+  .passos button .n{display:inline-flex;width:18px;height:18px;border-radius:50%;align-items:center;
+                    justify-content:center;font-weight:700;background:var(--painel2);border:1px solid var(--borda)}
+  .passos button.feita{color:var(--verde)}
+  .passos button.feita .n{background:var(--verde);color:#11111b;border-color:var(--verde)}
+  .passos button.on{color:var(--txt);border-color:var(--azul);background:#1e2a3a}
+  .passos button.on .n{background:var(--azul);color:#11111b;border-color:var(--azul)}
+  .passos button:disabled{opacity:.4;cursor:not-allowed}
+  .passo-titulo{font-size:16px;font-weight:700;margin:2px 0 3px}
+  .passo-titulo small{font-size:11px;color:var(--txt2);font-weight:400;margin-left:8px}
+  .passo-instr{font-size:13px;color:var(--txt2);line-height:1.55}
+  .passo-acao{margin:10px 0 14px}
+  .btn-passo{width:100%;padding:14px;font-size:15px;font-weight:700;border-radius:9px;
+             background:#1e3a2a;border-color:var(--verde);color:var(--verde)}
+  .btn-passo:disabled{opacity:.45;cursor:not-allowed}
+  .passo-dica{margin-top:7px;font-size:12px;color:var(--amarelo);text-align:center}
+  .passo-voltar{margin-top:6px;font-size:11px;color:var(--txt2);text-align:center}
+  .passo-voltar a{color:var(--txt2);cursor:pointer;text-decoration:underline}
+  .p5{display:grid;grid-template-columns:1fr 1fr;gap:14px;background:var(--painel);
+      border:1px solid var(--borda);border-radius:9px;padding:12px;margin-top:8px}
+  .p5 .grade button,.p5 .fora button{padding:13px 4px;font-size:12px}
+  .p5 .dupla button{padding:18px;font-size:15px;font-weight:700}
   #palco{position:relative;background:#000;border:1px solid var(--borda);border-radius:8px;
          overflow:hidden;display:flex;align-items:center;justify-content:center;
-         min-height:300px;max-height:56vh}
+         min-height:300px;max-height:72vh}
 
   /* ---- régua das traves: sobreposição de conferência, nunca gravada ---- */
   #regua{position:absolute;pointer-events:none;z-index:3}
@@ -558,15 +713,11 @@ PAGINA = r"""<!doctype html>
               background:rgba(17,17,27,.88);border:1px solid var(--borda);border-radius:7px;
               padding:5px 9px;font-size:11px;color:var(--txt);max-width:70%}
   #regua-info b{color:var(--laranja)}
-  #palco video,#palco img{max-width:100%;max-height:56vh;display:block}
+  #palco video,#palco img{max-width:100%;max-height:72vh;display:block}
   .barra{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:8px 0}
   .barra button{font-size:12px;padding:5px 9px}
-  .tira{display:flex;gap:4px;overflow-x:auto;padding-bottom:6px}
-  .tira figure{margin:0;flex:0 0 auto;cursor:pointer;border:2px solid transparent;border-radius:5px}
-  .tira figure.chute{border-color:var(--laranja)}
-  .tira figure.sel{border-color:var(--azul)}
-  .tira img{width:150px;display:block;border-radius:3px}
-  .tira figcaption{font-size:10px;color:var(--txt2);text-align:center}
+  .frame-pos{font-weight:700;color:var(--txt);min-width:160px;text-align:center}
+  .frame-mark{border-color:var(--azul);color:var(--azul)}
   table.ang{width:100%;border-collapse:collapse;font-size:11px;margin-top:4px}
   table.ang th{color:var(--txt2);text-align:left;font-weight:600;padding:3px 5px}
   table.ang td{padding:3px 5px;border-top:1px solid var(--borda);cursor:pointer}
@@ -604,6 +755,12 @@ PAGINA = r"""<!doctype html>
   #toast.on{opacity:1}
   #toast.erro{border-color:var(--vermelho);color:var(--vermelho)}
   #toast.bom{border-color:var(--verde);color:var(--verde)}
+  :focus-visible{outline:2px solid var(--azul);outline-offset:2px}
+  @media(max-width:1100px){#app{grid-template-columns:260px minmax(0,1fr) 310px}}
+  @media(max-width:800px){body{height:auto;overflow:auto}#app{height:auto;display:block}
+    .col{overflow:visible;border-left:0!important;border-bottom:1px solid var(--borda)}
+    #palco{max-height:none}}
+  @media(max-width:560px){.marcadores-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -645,16 +802,11 @@ PAGINA = r"""<!doctype html>
   <!-- ================= coluna 2: vídeo ================= -->
   <div class="col">
     <div id="cab"></div>
-    <div class="abas">
-      <button id="ab-video" class="on" onclick="modo('video')">Vídeo original</button>
-      <button id="ab-frame" onclick="modo('frame')">Frame a frame</button>
-      <button id="ab-clip" onclick="modo('clip')">Clip recortado</button>
-      <button id="ab-png" onclick="modo('png')">PNGs exportados</button>
-    </div>
+    <div class="passo-cab" id="passo-cab"></div>
     <div id="palco"><div style="color:#585b70;padding:60px">selecione um rótulo à esquerda</div></div>
     <div class="barra" id="controles"></div>
-    <h2 id="tira-tit" style="display:none">Tira de frames em volta do chute</h2>
-    <div class="tira" id="tira"></div>
+    <div id="passo-extra"></div>
+    <div class="passo-acao" id="passo-acao"></div>
     <div id="irmaos"></div>
   </div>
 
@@ -668,9 +820,16 @@ PAGINA = r"""<!doctype html>
 <script>
 const $ = s => document.querySelector(s);
 const FORA = ['fora_esquerda','fora_cima','fora_direita'];
-let itens = [], atual = null, modoAtual = 'video', frameAtual = 0, limite = 300;
+let itens = [], atual = null, modoAtual = 'frame', frameAtual = 0, limite = 300;
+// Sequência obrigatória: 1 início → 2 final → 3 clip → 4 vídeo com régua →
+// 5 região e gol. etapa = até onde o revisor chegou neste rótulo; alvo = qual
+// frame a aba de frame está ajustando; feito = provas de que cada passo foi
+// feito de verdade (andou frame a frame, viu o clip até o fim, usou a régua,
+// clicou região e gol). Nada disso é gravado: zera ao abrir outro rótulo.
+let etapa = 1, alvo = 'inicio', conferindo = false, manterEtapa = false;
+let feito = {clip:false, regua:false, regiao:false, gol:false};
 let statusGlobal = {}, filtroRegiao = '', sel = {region:'', gol:false};
-let tiraCfg = {antes:4, depois:14, passo:2};
+let frames = {inicio:0, chute:0, fps:30};
 
 function toast(msg, tipo){
   const t = $('#toast'); t.textContent = msg; t.className = 'on ' + (tipo||'');
@@ -764,7 +923,8 @@ function renderLista(){
         <span style="color:${i.is_goal?'var(--verde)':'var(--txt2)'}">${i.is_goal?'GOL':'—'}</span>
         <span style="margin-left:auto;color:var(--txt2)">${i.chute_time_s}s</span>
       </div>
-      <div class="vid">${esc(i.video_file)} · #${i.penalty_id}</div>
+      <div class="jogo">${esc(i.jogo)}</div>
+      <div class="vid">${esc(i.competicao_label)} · pênalti ${esc(i.penalty_id)} · ${esc(i.video_file)}</div>
     </div>`).join('') || '<div style="color:#585b70;padding:20px 4px">nada com esses filtros</div>';
   $('#mais').style.display = itens.length > limite ? 'inline-block' : 'none';
 }
@@ -792,80 +952,216 @@ function vizinho(d){
 async function abrir(uid){
   atual = await api('/api/registro/' + encodeURIComponent(uid));
   const r = atual.reg;
-  frameAtual = r.chute_frame;
+  frames = {inicio:r.inicio_frame, chute:r.chute_frame, fps:r.fps};
+  if(!manterEtapa){ etapa = 1; alvo = 'inicio'; conferindo = false; modoAtual = 'frame'; frameAtual = r.inicio_frame;
+    feito = {clip:false, regua:false, regiao:false, gol:false}; }
+  else if(modoAtual === 'frame') frameAtual = frames[alvo];
+  manterEtapa = false;
   sel = {region: r.region, gol: r.is_goal};
   reguaAoTrocarLance();
   const i = idx();
   $('#cab').innerHTML = `
+    <div class="jogo-cab">
+      <h1>${esc(r.jogo)}</h1>
+      ${r.detalhe_video?`<div style="color:var(--txt2);font-size:12px;margin-bottom:7px">${esc(r.detalhe_video)}</div>`:''}
+      <div class="jogo-meta"><span class="chip">${esc(r.competicao_label)}</span>
+        <span class="chip">Pênalti ${esc(r.penalty_id)}</span>
+        <span class="chip">Chute em ${esc(r.chute_time_s)}s do vídeo</span></div>
+      <div class="jogo-arquivo" title="Nome completo do arquivo">${esc(r.video_file)}</div>
+      ${r.source_folder?`<div class="jogo-arquivo">Pasta: ${esc(r.source_folder)}</div>`:''}
+    </div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:5px">
       <b style="font-size:15px">${esc(r.region_label || r.region)}</b>
-      <span class="chip">${esc(r.competicao_label)}</span>
-      <span class="chip">pênalti ${esc(r.penalty_id)}</span>
       <span class="chip">${selo(r.status, true)}${r.revisado_em
         ? ' <span style="color:var(--txt2)">em ' + esc(r.revisado_em.replace('T',' ')) + '</span>' : ''}</span>
       <span style="margin-left:auto;display:flex;gap:4px;align-items:center">
         <span class="chip" ${i<0?'style="color:var(--amarelo)"':''}>${
           i<0 ? 'fora do filtro · '+itens.length : (i+1)+'/'+itens.length}</span>
-        <button onclick="vizinho(-1)" ${i===0||!itens.length?'disabled':''}>&larr;</button>
-        <button onclick="vizinho(1)" ${(i>=0&&i>=itens.length-1)||!itens.length?'disabled':''}>&rarr;</button>
+        <button onclick="vizinho(-1)" title="Rótulo anterior (PgUp)" ${i===0||!itens.length?'disabled':''}>&larr; rótulo</button>
+        <button onclick="vizinho(1)" title="Próximo rótulo (PgDn)" ${(i>=0&&i>=itens.length-1)||!itens.length?'disabled':''}>rótulo &rarr;</button>
       </span>
     </div>
-    <div class="chip" style="display:block;margin-bottom:8px">${esc(r.video_file)}</div>
     ${!atual.video_disponivel?'<div class="aviso">vídeo original não encontrado no índice — use o clip ou os PNGs</div>':''}`;
-  renderLista(); render(); renderEditor();
+  renderLista(); render(); renderEditor(); renderPasso();
 }
 
-function modo(m){ modoAtual = m;
-  ['video','frame','clip','png'].forEach(x=>$('#ab-'+x).classList.toggle('on', x===m)); render(); }
+function modo(m){ modoAtual = m; render(); }
+
+const ETAPAS = ['inicio','chute','clip','video','aprovar'];
+const NOME_ETAPA = {1:'confirmar o frame de início', 2:'confirmar o frame final', 3:'conferir o clip',
+                    4:'ver o vídeo com a régua', 5:'confirmar região e gol'};
+function etapaVisivel(){
+  return modoAtual==='frame' ? (alvo==='inicio'?1:2) : modoAtual==='clip' ? 3
+       : modoAtual==='video' ? (conferindo?5:4) : 0;
+}
+// o que falta para o passo visível poder ser confirmado
+function prontoEtapa(vis){
+  if(vis===1||vis===2) return {pronto:true, dica:'',
+    rotulo:vis===1 ? 'Confirmo: este é o frame de início' : 'Confirmo: este é o frame final (chute)'};
+  if(vis===3){ const ok=feito.clip||!atual.clip_existe;
+    return {pronto:ok, rotulo:'O clip está correto → ver o vídeo', dica:ok?'':'assista o clip até o fim'}; }
+  if(vis===4) return {pronto:feito.regua, rotulo:'Vi onde a bola foi → confirmar região e gol',
+                      dica:feito.regua?'':'aperte E e clique nas 4 traves para colocar a grade do gol sobre o vídeo'};
+  const ok=feito.regiao&&feito.gol;
+  return {pronto:ok, rotulo:'Aprovar e ir ao próximo rótulo',
+          dica:ok?'':'clique na região onde a bola foi e em SIM/NÃO, logo abaixo'};
+}
+const PASSOS = [{t:'Frame de início', curto:'Início'}, {t:'Frame final (chute)', curto:'Final'},
+                {t:'Clip da cobrança', curto:'Clip'}, {t:'Vídeo com a régua', curto:'Vídeo'},
+                {t:'Região e gol', curto:'Região'}];
+function instrucao(vis){
+  if(vis===1) return 'Este é o <b>primeiro frame da cobrança</b> — o cobrador parado, antes da corrida? Se não for, ande com <kbd>←</kbd> <kbd>→</kbd> (Shift = 10) até ele. Quando estiver certo, clique em Confirmo.';
+  if(vis===2) return 'Este é o <b>frame do chute</b> — a bola saindo do pé? Se não for, ande com <kbd>←</kbd> <kbd>→</kbd> até ele. Quando estiver certo, clique em Confirmo.';
+  if(vis===3) return atual.clip_existe
+    ? 'Este clip vai do início ao final que você confirmou. <b>Assista até o fim</b>: mostra a cobrança inteira, do cobrador parado até o chute?'
+    : 'O clip deste rótulo não existe no disco. Confirme para seguir ao vídeo.';
+  if(vis===4) return 'Veja <b>onde a bola foi</b>: o vídeo começa no início da cobrança e para sozinho 30 s depois. Aperte <kbd>E</kbd> e clique nas <b>4 traves</b> para colocar a grade do gol sobre a imagem.';
+  return 'Com a grade sobre o gol, confirme <b>onde a bola foi</b> e <b>se foi gol</b> — mesmo que já esteja certo, clique nos dois.';
+}
+function painelRegiao(){
+  const lab = c => (atual.regioes.find(x=>x.code===c)||{label:c}).label;
+  const bt = c => `<button class="gol ${sel.region===c?'on':''}" data-reg="${c}" onclick="setReg('${c}')">${lab(c).replace('Gol - ','')}</button>`;
+  return `<div class="p5">
+    <div><h2>Onde a bola foi?</h2>
+      <div class="grade">${['gol_topo_esquerdo','gol_topo_centro','gol_topo_direito','gol_meio_esquerdo','gol_meio_centro',
+        'gol_meio_direito','gol_baixo_esquerdo','gol_baixo_centro','gol_baixo_direito'].map(bt).join('')}</div>
+      <div class="fora">${FORA.map(c=>`<button data-reg="${c}" class="${sel.region===c?'on':''}"
+        onclick="setReg('${c}')">${lab(c).replace('Fora - ','Fora ')}</button>`).join('')}</div>
+    </div>
+    <div><h2>Foi gol?</h2>
+      <div class="dupla">
+        <button class="${sel.gol?'on-sim':''}" onclick="setGol(true)">SIM</button>
+        <button class="${!sel.gol?'on-nao':''}" onclick="setGol(false)">NÃO</button>
+      </div>
+      <div class="passo-instr" style="margin-top:8px">gravado: <b>${esc(atual.reg.region_label||atual.reg.region)}</b> · ${atual.reg.is_goal?'gol':'não foi gol'}</div>
+    </div></div>`;
+}
+// cabeçalho do passo, painel extra (região/gol no 5) e o botão único de confirmar.
+// Roda a cada ação do revisor: é barato e mantém tudo coerente com `feito`.
+function renderPasso(){
+  if(!atual) return;
+  const vis = etapaVisivel() || etapa;
+  const p = prontoEtapa(vis);
+  $('#passo-cab').innerHTML = `
+    <div class="passos">${PASSOS.map((x,i)=>{ const n=i+1;
+      return `<button onclick="irEtapa(${n})" class="${n===vis?'on':''} ${n<etapa?'feita':''}" ${n>etapa?'disabled':''}
+        title="${n>etapa?'conclua o passo '+etapa+' primeiro':x.t}"><span class="n">${n<etapa?'✓':n}</span>${x.curto}</button>`; }).join('')}</div>
+    <div class="passo-titulo">Passo ${vis} de 5 · ${PASSOS[vis-1].t}${vis<=2
+      ? `<small>gravado: frame ${vis===1?atual.reg.inicio_frame:atual.reg.chute_frame}</small>` : ''}</div>
+    <div class="passo-instr">${instrucao(vis)}</div>`;
+  $('#passo-extra').innerHTML = vis===5 ? painelRegiao() : '';
+  const voltar = vis===3
+    ? `<div class="passo-voltar">Não está certo? <a onclick="irEtapa(1)">voltar ao início</a> · <a onclick="irEtapa(2)">voltar ao final</a></div>`
+    : vis>=4 ? `<div class="passo-voltar"><a onclick="irEtapa(3)">rever o clip</a> · <a onclick="irEtapa(2)">voltar aos frames</a></div>` : '';
+  $('#passo-acao').innerHTML = `
+    <button class="btn-passo" id="btn-confirma" onclick="avancar()" ${p.pronto?'':'disabled'}>${p.rotulo} <kbd>Enter</kbd></button>
+    ${p.dica?`<div class="passo-dica">${p.dica}</div>`:''}${voltar}`;
+}
+// vai para uma etapa já liberada (voltar é sempre permitido; pular, não)
+async function irEtapa(n){
+  if(!atual) return;
+  if(n>etapa){ toast(`Primeiro conclua o passo ${etapa}: ${NOME_ETAPA[etapa]} (Enter avança)`, 'erro'); return; }
+  conferindo = n===5;
+  if(n===1){ alvo='inicio'; frameAtual=frames.inicio; modo('frame'); }
+  else if(n===2){ alvo='chute'; frameAtual=frames.chute; modo('frame'); }
+  else if(n===3){
+    // frames corrigidos: grava (e regera o clip) antes de mostrá-lo
+    if(haPendencias()){ manterEtapa = true; modoAtual = 'clip';
+      if(!await salvar()){ manterEtapa = false; etapa = 2; irEtapa(2); } }
+    else modo('clip');
+  }
+  else if(modoAtual!=='video') modo('video');
+  else renderPasso();
+  if(n===5){ const acao = $('#passo-acao'); if(acao) acao.scrollIntoView({block:'end'}); }  // grade, SIM/NÃO e Aprovar à vista
+}
+// Enter: confirma a etapa visível e abre a seguinte
+async function avancar(){
+  if(!atual) return;
+  const vis = etapaVisivel() || etapa;
+  const p = prontoEtapa(vis);
+  if(!p.pronto){ toast(p.dica, 'erro'); return; }
+  if(vis<=2){
+    if(!atual.video_disponivel){ toast('Vídeo original indisponível para conferir frames', 'erro'); return; }
+    const qual = vis===1 ? 'inicio' : 'chute';
+    const mudou = frames[qual] !== frameAtual;
+    alterarFrame(qual, frameAtual, false);
+    // frame alterado: clip, vídeo e região precisam ser conferidos de novo
+    if(mudou){ feito.clip = feito.regua = feito.regiao = feito.gol = false; }
+    etapa = mudou ? vis+1 : Math.max(etapa, vis+1);
+    toast(qual==='inicio' ? `Início confirmado no frame ${frameAtual}. Agora o frame final.`
+                          : `Final confirmado no frame ${frameAtual}. Confira o clip.`);
+    await irEtapa(vis+1);
+  } else if(vis===3){ etapa = Math.max(etapa, 4); await irEtapa(4); }
+  else if(vis===4){ etapa = 5; await irEtapa(5); }
+  else aprovar();
+}
+function haPendencias(){
+  const r = atual.reg;
+  return frames.inicio!==r.inicio_frame || frames.chute!==r.chute_frame ||
+    sel.region!==r.region || sel.gol!==r.is_goal || $('#ed-camera').value!==r.camera_type ||
+    $('#ed-obs').value!==r.observations;
+}
+function framesValidos(){
+  return Number.isInteger(frames.inicio) && frames.inicio>=0 && Number.isInteger(frames.chute) &&
+    frames.chute>frames.inicio && frames.fps>0;
+}
 
 function render(){
   if(!atual) return;
   const r = atual.reg, nome = encodeURIComponent(r.video_file), uid = encodeURIComponent(r.uid);
 
   if(modoAtual === 'frame'){
-    $('#palco').innerHTML = `<img id="mid" src="/midia/frame?nome=${nome}&n=${frameAtual}">`;
+    $('#palco').innerHTML = atual.video_disponivel
+      ? `<img id="mid" src="/midia/frame?nome=${nome}&n=${frameAtual}" alt="Frame ${frameAtual} do jogo"
+          onerror="toast('Este frame não foi encontrado no vídeo.', 'erro')">`
+      : '<div style="color:var(--txt2);padding:60px">vídeo original indisponível para conferir frames</div>';
     $('#controles').innerHTML = `
-      <button onclick="passo(-10)">&laquo; 10</button>
-      <button onclick="passo(-1)">&lsaquo; 1</button>
-      <span class="chip">frame <b id="fnum">${frameAtual}</b> · <span id="ftime">${(frameAtual/r.fps).toFixed(2)}</span>s</span>
-      <button onclick="passo(1)">1 &rsaquo;</button>
-      <button onclick="passo(10)">10 &raquo;</button>
-      <button onclick="irFrame(atual.reg.inicio_frame)">início</button>
-      <button onclick="irFrame(atual.reg.chute_frame)">chute</button>
-      <button onclick="usarFrame('chute')">marcar chute aqui</button>
-      <button onclick="usarFrame('inicio')">marcar início aqui</button>`;
+      <button onclick="passo(-10)" aria-label="Voltar 10 frames">−10</button>
+      <button onclick="passo(-1)" aria-label="Voltar 1 frame">−1</button>
+      <span class="chip frame-pos">frame <b id="fnum">${frameAtual}</b> · <span id="ftime">${tempoFrame(frameAtual)}</span> s</span>
+      <button onclick="passo(1)" aria-label="Avançar 1 frame">+1</button>
+      <button onclick="passo(10)" aria-label="Avançar 10 frames">+10</button>
+      <span class="chip">ir ao frame <input id="ir-frame" type="number" min="0" style="width:84px"
+        value="${frameAtual}" onchange="irFrame(this.value)"></span>
+      <button onclick="irFrame(atual.reg[alvo==='inicio'?'inicio_frame':'chute_frame'])">voltar ao gravado</button>`;
   } else if(modoAtual === 'clip'){
     $('#palco').innerHTML = atual.clip_existe
-      ? `<video id="mid" src="/midia/clip?uid=${uid}" controls autoplay loop muted></video>`
+      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted></video>`
       : '<div style="color:var(--vermelho);padding:60px">clip não encontrado no disco</div>';
     $('#controles').innerHTML = velocidades();
-  } else if(modoAtual === 'png'){
-    $('#palco').innerHTML = `<div style="display:flex;gap:6px;background:#000">
-      ${atual.png_inicio?`<figure style="margin:0"><img src="/midia/png?uid=${uid}&qual=inicio" style="max-height:52vh">
-        <figcaption style="color:#9399b2;font-size:11px;text-align:center">início</figcaption></figure>`:''}
-      ${atual.png_chute?`<figure style="margin:0"><img src="/midia/png?uid=${uid}&qual=chute" style="max-height:52vh">
-        <figcaption style="color:#9399b2;font-size:11px;text-align:center">chute</figcaption></figure>`:''}
-      ${!atual.png_inicio&&!atual.png_chute?'<div style="color:var(--vermelho);padding:60px">PNGs não encontrados</div>':''}
-    </div>`;
-    $('#controles').innerHTML = '';
+    // prova de que o clip foi visto: chegou ao fim (ou deu a volta, com loop)
+    const vc = $('#mid');
+    if(vc && vc.tagName==='VIDEO'){
+      let ult = 0;
+      const visto = ()=>{ if(!feito.clip){ feito.clip = true; renderPasso(); } };
+      vc.addEventListener('ended', visto);
+      vc.addEventListener('timeupdate', ()=>{
+        if(vc.duration && (vc.currentTime+0.3 >= vc.duration || (vc.currentTime < ult && ult+0.6 >= vc.duration))) visto();
+        ult = vc.currentTime; });
+    }
   } else {
     if(!atual.video_disponivel){
       $('#palco').innerHTML = '<div style="color:#585b70;padding:60px">sem vídeo original</div>';
       $('#controles').innerHTML = '';
     } else {
-      $('#palco').innerHTML = `<video id="mid" src="/midia/video?nome=${nome}" controls preload="metadata"></video>`;
-      const v = $('#mid');
-      v.addEventListener('loadedmetadata', ()=>{ v.currentTime = Math.max(r.inicio_time_s-1.5,0); }, {once:true});
+      $('#palco').innerHTML = `<video id="mid" src="/midia/video?nome=${nome}" controls preload="metadata" autoplay></video>`;
+      // janela de 30 s a partir do início da cobrança: começa nele e pausa
+      // (uma vez) ao chegar no fim dela — dá para ver onde a bola foi
+      const v0 = $('#mid'), t0 = tempoDoFrame(frames.inicio), tFim = t0 + 30;
+      let avisou = false;
+      v0.addEventListener('loadedmetadata', ()=>{ v0.currentTime = t0; }, {once:true});
+      v0.addEventListener('timeupdate', ()=>{
+        if(!avisou && v0.currentTime >= tFim){ avisou = true; v0.pause(); toast('Fim dos 30 s a partir do início da cobrança.'); } });
       $('#controles').innerHTML = `
-        <button onclick="irPara(atual.reg.inicio_time_s-1.5)">início -1.5s</button>
-        <button onclick="irPara(atual.reg.chute_time_s)">momento do chute</button>
+        <button onclick="irFrameNoVideo(frames.inicio)">Início da cobrança</button>
+        <button onclick="irFrameNoVideo(frames.chute)">Momento do chute</button>
         <button onclick="pular(-1)">-1s</button><button onclick="pular(1)">+1s</button>
         ${velocidades()}
-        <span class="chip">início ${r.inicio_time_s}s · chute ${r.chute_time_s}s · ${r.fps} fps</span>`;
+        <button class="frame-mark" onclick="reguaAlternar()">Régua das traves <kbd>E</kbd></button>`;
     }
   }
-  carregarTira();
   renderIrmaos();
+  renderPasso();
   // a régua é redesenhada por cima da mídia nova; vídeo/imagem só têm tamanho
   // depois de carregar, então redesenha de novo no primeiro quadro
   const mid=reguaMidia();
@@ -879,14 +1175,32 @@ const velocidades = () => `<button onclick="vel(0.25)">0.25x</button>
 function irPara(t){ const v=$('#mid'); if(v&&v.tagName==='VIDEO') v.currentTime=Math.max(t,0); }
 function pular(d){ const v=$('#mid'); if(v&&v.tagName==='VIDEO') v.currentTime=Math.max(v.currentTime+d,0); }
 function vel(x){ const v=$('#mid'); if(v&&v.tagName==='VIDEO') v.playbackRate=x; }
-function irFrame(n){ frameAtual = Math.max(n,0); if(modoAtual!=='frame') return modo('frame');
+function tempoFrame(n){ return (n / (frames.fps || 30)).toFixed(2); }
+// Buscar no <video> pelo MEIO do frame: chute_time_s = N/fps cai rente a
+// fronteira e o navegador mostra N-1 em ~40% dos rotulos (fps 29,97 arredondado
+// a 4 casas no CSV). (N+0.5)/fps cai sempre dentro do frame N.
+function tempoDoFrame(n){ return Math.max((Number(n) + 0.5) / (frames.fps || 30), 0); }
+function irFrameNoVideo(n){ irPara(tempoDoFrame(n)); }
+// frame que o <video> esta mostrando: N ocupa [N/fps, (N+1)/fps), logo floor;
+// o epsilon cobre o erro de ponto flutuante quando currentTime cai exato em N/fps.
+function frameNoVideo(v){ return Math.max(Math.floor(v.currentTime * (frames.fps||30) + 1e-4), 0); }
+function irFrame(n){
+  if(!atual.video_disponivel){ toast('Vídeo original indisponível para conferir frames', 'erro'); return; }
+  if(String(n).trim()==='' || !Number.isInteger(Number(n)) || Number(n)<0){
+    toast('Informe um número de frame válido.', 'erro'); return;
+  }
+  frameAtual = Number(n);
+  if(modoAtual!=='frame') return modo('frame');
   $('#mid').src = `/midia/frame?nome=${encodeURIComponent(atual.reg.video_file)}&n=${frameAtual}`;
-  $('#fnum').textContent = frameAtual; $('#ftime').textContent = (frameAtual/atual.reg.fps).toFixed(2);
-  marcarTira(); }
-function passo(d){ irFrame(frameAtual + d); }
-function usarFrame(qual){
-  $('#ed-'+qual).value = frameAtual;
-  toast(`frame ${frameAtual} anotado como ${qual} — clique em Salvar para gravar`);
+  $('#mid').alt = `Frame ${frameAtual} do jogo`;
+  $('#fnum').textContent = frameAtual; $('#ftime').textContent = tempoFrame(frameAtual);
+  const inp = $('#ir-frame'); if(inp) inp.value = frameAtual; }
+function passo(d){ irFrame(Math.max(frameAtual + d, 0)); }
+function alterarFrame(qual, valor, ver=true){
+  const n = Number(valor);
+  if(!Number.isInteger(n) || n<0) return;
+  frames[qual] = n;
+  if(ver) irFrame(n);
 }
 
 // ---------- régua das traves (E mostra, R recolhe) ----------
@@ -912,6 +1226,9 @@ function reguaLer(){
 function reguaGravar(){ try{localStorage.setItem(reguaChave(),JSON.stringify(regua.pontos));}catch(e){} }
 const reguaMidia=()=>$('#palco video')||$('#palco img');
 
+// marcar as traves pede imagem parada: pausa o vídeo ao entrar na calibração
+// e a cada clique, e NÃO retoma depois do 4º ponto — quem decide é o revisor
+function reguaPausar(){ const m=reguaMidia(); if(m && m.tagName==='VIDEO' && !m.paused) m.pause(); }
 function reguaAlternar(){          // tecla E
   if(!atual) return;
   if(regua.modo==='off'){
@@ -921,6 +1238,8 @@ function reguaAlternar(){          // tecla E
   }else{                            // já visível: E recomeça a marcação
     regua.pontos=[]; regua.modo='calibrando';
   }
+  if(regua.modo==='calibrando') reguaPausar();
+  if(regua.modo==='on') reguaUsada();
   reguaDesenhar();
 }
 function reguaNomes(){             // tecla T
@@ -934,6 +1253,10 @@ function reguaNomes(){             // tecla T
 function reguaRecolher(){          // tecla R
   if(regua.modo==='off') return;
   regua.modo='off'; regua.arrastando=-1; reguaDesenhar();
+}
+function reguaUsada(){             // prova do passo 4: régua posta sobre o vídeo deste lance
+  if(modoAtual==='video' && !feito.regua){ feito.regua = true; renderPasso();
+    toast('Régua sobre o lance. Veja onde a bola foi e confirme.'); }
 }
 function reguaAoTrocarLance(){     // outro rótulo = outro enquadramento
   if(regua.modo==='off') return;
@@ -977,9 +1300,10 @@ function reguaDesenhar(){
         points:regua.pontos.map(p=>{const q=px(p);return `${q.x},${q.y}`;}).join(' ')});
     }
     svg.addEventListener('click',ev=>{
+      reguaPausar();                 // segue parado enquanto os pontos são postos
       const r=svg.getBoundingClientRect();
       regua.pontos.push({x:(ev.clientX-r.left)/r.width,y:(ev.clientY-r.top)/r.height});
-      if(regua.pontos.length===4){ regua.modo='on'; reguaGravar(); }
+      if(regua.pontos.length===4){ regua.modo='on'; reguaGravar(); reguaUsada(); }
       reguaDesenhar();
     });
   }else{
@@ -1054,35 +1378,15 @@ addEventListener('pointerup',()=>{
 });
 addEventListener('resize',()=>{ if(regua.modo!=='off') reguaDesenhar(); });
 
-// ---------- tira de frames ----------
-async function carregarTira(){
-  if(!atual || !atual.video_disponivel){ $('#tira').innerHTML=''; $('#tira-tit').style.display='none'; return; }
-  const r = atual.reg;
-  $('#tira-tit').style.display = 'block';
-  $('#tira').innerHTML = '<div style="color:#585b70;padding:10px">decodificando frames...</div>';
-  const q = new URLSearchParams({nome:r.video_file, centro:r.chute_frame, fps:r.fps, ...tiraCfg});
-  try{
-    const d = await api('/midia/tira?'+q);
-    $('#tira').innerHTML = d.frames.map(f=>`
-      <figure data-n="${f.n}" class="${f.chute?'chute':''}" onclick="irFrame(${f.n})">
-        <img src="${f.img}"><figcaption>${f.n} · ${f.t}s${f.chute?' · chute':''}</figcaption>
-      </figure>`).join('');
-    marcarTira();
-  }catch(e){ $('#tira').innerHTML = `<div style="color:var(--vermelho);padding:10px">${e.message}</div>`; }
-}
-function marcarTira(){
-  document.querySelectorAll('#tira figure').forEach(f=>
-    f.classList.toggle('sel', +f.dataset.n === frameAtual));
-}
-
-// ---------- outros ângulos do mesmo lance ----------
+// ---------- rótulos próximos no mesmo vídeo ----------
 function renderIrmaos(){
   const irs = atual.irmaos;
   if(!irs.length){ $('#irmaos').innerHTML = ''; return; }
   const div = new Set(irs.map(i=>i.region).concat(atual.reg.region)).size > 1;
   $('#irmaos').innerHTML = `
-    <h2>${irs.length} outro(s) rótulo(s) no mesmo lance
-        ${div?'<span style="color:var(--vermelho)"> — regiões divergentes!</span>':''}</h2>
+    <h2>${irs.length} marcação(ões) próxima(s) neste vídeo
+        ${div?'<span style="color:var(--vermelho)"> — regiões diferentes</span>':''}</h2>
+    <div style="font-size:11px;color:var(--txt2)">Podem ser outros ângulos desta cobrança; confira o tempo antes de comparar.</div>
     <table class="ang"><tr><th>região</th><th>câmera</th><th>gol</th><th>chute</th><th>status</th></tr>
     ${irs.map(i=>`<tr data-uid="${esc(i.uid)}">
       <td style="color:var(--laranja)">${esc(i.region)}</td><td>${esc(i.camera_type)}</td>
@@ -1093,47 +1397,22 @@ function renderIrmaos(){
 // ---------- editor ----------
 function renderEditor(){
   const r = atual.reg, o = atual.original;
-  const lab = c => (atual.regioes.find(x=>x.code===c)||{label:c}).label;
-  const bt = c => `<button class="gol ${sel.region===c?'on':''}" data-reg="${c}"
-      onclick="setReg('${c}')">${lab(c).replace('Gol - ','')}</button>`;
   const mudou = [];
   if(o.region !== r.region) mudou.push(`região: ${o.region} → ${r.region}`);
   if(o.is_goal !== r.is_goal) mudou.push(`gol: ${o.is_goal} → ${r.is_goal}`);
   if(o.camera_type !== r.camera_type) mudou.push(`câmera: ${o.camera_type} → ${r.camera_type}`);
   if(o.inicio_frame !== r.inicio_frame) mudou.push(`início: ${o.inicio_frame} → ${r.inicio_frame}`);
-  if(o.chute_frame !== r.chute_frame) mudou.push(`chute: ${o.chute_frame} → ${r.chute_frame}`);
+  if(o.chute_frame !== r.chute_frame) mudou.push(`final: ${o.chute_frame} → ${r.chute_frame}`);
 
   $('#editor').innerHTML = `
     ${mudou.length?`<div class="diff"><b>alterado em relação ao original</b><br>${mudou.map(esc).join('<br>')}</div>`:''}
     ${r.status==='descartado'?`<div class="aviso">descartado: ${esc(r.motivo)}<br>
        <button onclick="reverter()" style="margin-top:6px">restaurar</button></div>`:''}
 
-    <h2>Região do chute</h2>
-    <div class="grade">
-      ${bt('gol_topo_esquerdo')}${bt('gol_topo_centro')}${bt('gol_topo_direito')}
-      ${bt('gol_meio_esquerdo')}${bt('gol_meio_centro')}${bt('gol_meio_direito')}
-      ${bt('gol_baixo_esquerdo')}${bt('gol_baixo_centro')}${bt('gol_baixo_direito')}
-    </div>
-    <div class="fora">
-      ${FORA.map(c=>`<button data-reg="${c}" class="${sel.region===c?'on':''}"
-        onclick="setReg('${c}')">${lab(c).replace('Fora - ','Fora ')}</button>`).join('')}
-    </div>
-
-    <h2>Foi gol?</h2>
-    <div class="dupla">
-      <button class="${sel.gol?'on-sim':''}" onclick="setGol(true)">SIM</button>
-      <button class="${!sel.gol?'on-nao':''}" onclick="setGol(false)">NÃO</button>
-    </div>
-
     <h2>Câmera</h2>
     <select id="ed-camera" style="width:100%">
       ${atual.cameras.map(c=>`<option ${c===r.camera_type?'selected':''}>${esc(c)}</option>`).join('')}
     </select>
-
-    <h2>Frames</h2>
-    <div class="linha-campo"><label>início</label><input id="ed-inicio" type="number" value="${r.inicio_frame}"></div>
-    <div class="linha-campo"><label>chute</label><input id="ed-chute" type="number" value="${r.chute_frame}"></div>
-    <div class="linha-campo"><label>fps</label><input id="ed-fps" type="number" step="0.001" value="${r.fps}"></div>
 
     <h2>Observação (vai para o CSV)</h2>
     <textarea id="ed-obs" rows="2" style="width:100%">${esc(r.observations)}</textarea>
@@ -1141,8 +1420,6 @@ function renderEditor(){
     <textarea id="ed-nota" rows="2" style="width:100%" placeholder="o que você viu no vídeo...">${esc(r.nota)}</textarea>
 
     <div class="acoes">
-      <button class="b-ok" onclick="aprovar()">Está correto, próximo <kbd>A</kbd></button>
-      <button class="b-salvar" onclick="salvar()">Salvar correção <kbd>S</kbd></button>
       <button class="b-desc" onclick="descartar()">Descartar rótulo</button>
       <button onclick="reverter()" ${mudou.length||r.status!=='pendente'?'':'disabled'}>Voltar ao original</button>
       <button onclick="desfazer()" ${statusGlobal.pode_desfazer?'':'disabled'}>Desfazer última ação <kbd>Z</kbd></button>
@@ -1150,45 +1427,57 @@ function renderEditor(){
     </div>
 
     <div class="rodape">
-      <kbd>←</kbd><kbd>→</kbd> rótulo anterior/próximo · <kbd>A</kbd> aprovar · <kbd>S</kbd> salvar<br>
+      Região, gol e frames são confirmados no passo a passo do meio; câmera e observação são gravados junto, no passo 5.<br><br>
+      <kbd>Enter</kbd> confirma o passo · <kbd>←</kbd><kbd>→</kbd> frame (<kbd>Shift</kbd> = 10) ·
+      <kbd>PgUp</kbd><kbd>PgDn</kbd> rótulo anterior/próximo · <kbd>A</kbd> aprovar (passo 5)<br>
       <kbd>7</kbd><kbd>8</kbd><kbd>9</kbd> / <kbd>4</kbd><kbd>5</kbd><kbd>6</kbd> /
-      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> grade do gol (layout do teclado numérico)<br>
-      <kbd>J</kbd> fora esquerda · <kbd>I</kbd> fora cima · <kbd>L</kbd> fora direita<br>
-      <kbd>F</kbd> frame a frame · <kbd>,</kbd><kbd>.</kbd> frame anterior/próximo<br>
-      <kbd>E</kbd> régua das traves (4 cliques) · <kbd>T</kbd> só os traços ·
-      <kbd>R</kbd> recolhe a régua<br><br>
+      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> grade do gol (teclado numérico) ·
+      <kbd>J</kbd> <kbd>I</kbd> <kbd>L</kbd> fora esquerda / cima / direita<br>
+      <kbd>E</kbd> régua das traves (4 cliques) · <kbd>T</kbd> só os traços · <kbd>R</kbd> recolhe ·
+      <kbd>Z</kbd> desfazer<br><br>
       Grava em <b>_revisao_manual/revisao.csv</b>.<br>Os labels.csv originais nunca são escritos.
     </div>`;
 }
 function setReg(c){
   sel.region = c;
-  document.querySelectorAll('[data-reg]').forEach(b=>b.classList.toggle('on', b.dataset.reg===c));
-  if(c.startsWith('fora')) setGol(false);
+  if(etapa>=4) feito.regiao = true;      // prova do passo 5
+  if(c.startsWith('fora')) setGol(false); else renderPasso();
   reguaDesenhar();                       // a célula marcada segue a escolha
 }
 function setGol(v){
   sel.gol = v;
-  const bs = document.querySelectorAll('.dupla button');
-  bs[0].className = v?'on-sim':''; bs[1].className = v?'':'on-nao';
+  if(etapa>=4) feito.gol = true;
+  renderPasso();                         // redesenha a grade e SIM/NÃO
 }
 
 // ---------- ações ----------
 async function salvar(){
   try{
+    if(!framesValidos()) throw new Error('O frame final deve vir depois do início.');
+    const r0 = atual.reg, framesMudaram = frames.inicio!==r0.inicio_frame || frames.chute!==r0.chute_frame;
     const r = await api('/api/editar', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({uid: atual.reg.uid, region: sel.region, camera: $('#ed-camera').value,
-        gol: sel.gol, inicio_frame: parseInt($('#ed-inicio').value),
-        chute_frame: parseInt($('#ed-chute').value), fps: parseFloat($('#ed-fps').value),
+        gol: sel.gol, inicio_frame: frames.inicio, chute_frame: frames.chute,
+        // o fps do vídeo só vai junto quando um frame mudou: os tempos são
+        // recalculados com a taxa certa, sem mexer em quem só corrigiu região
+        fps: framesMudaram ? frames.fps : null,
         observations: $('#ed-obs').value, nota: $('#ed-nota').value})});
     toast('salvo: ' + r.mudancas.join(' · '), 'bom');
+    manterEtapa = true;
     const uid = atual.reg.uid; await carregar(true); await abrir(uid);
-  }catch(e){ toast(e.message, 'erro'); }
+    return true;
+  }catch(e){ toast(e.message, 'erro'); return false; }
 }
 async function aprovar(){
   try{
+    if(etapa<5) throw new Error(`Siga a sequência: falta ${NOME_ETAPA[etapa]} (passo ${etapa}).`);
+    const p5 = prontoEtapa(5); if(!p5.pronto) throw new Error(p5.dica);
+    if(!framesValidos()) throw new Error('O frame final deve vir depois do início.');
+    // região/gol corrigidos no passo 5: grava antes de aprovar
+    if(haPendencias()){ manterEtapa = true; if(!await salvar()) return; }
     await api('/api/aprovar', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({uid: atual.reg.uid, nota: $('#ed-nota').value})});
-    toast('conferido, sem alteração', 'bom');
+    toast((atual.reg.alteracoes||[]).length ? 'conferido, com correções' : 'conferido, sem alteração', 'bom');
     // guarda o proximo ANTES de recarregar: com o filtro em "pendentes" o item
     // aprovado sai da lista e os indices andam um para tras.
     const i = idx(), prox = i >= 0 && i+1 < itens.length ? itens[i+1].uid : null;
@@ -1237,12 +1526,17 @@ const GRADE = {'7':'gol_topo_esquerdo','8':'gol_topo_centro','9':'gol_topo_direi
 document.addEventListener('keydown', e=>{
   if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || !atual) return;
   const k = e.key.toLowerCase();
-  if(k==='arrowleft'){ e.preventDefault(); vizinho(-1); }
-  else if(k==='arrowright'){ e.preventDefault(); vizinho(1); }
+  // as setas sao o ajuste de frame: e o trabalho principal da tela.
+  // trocar de rotulo foi para PageUp/PageDown.
+  if(k==='arrowleft'){ e.preventDefault(); if(modoAtual!=='frame') modo('frame');
+                       else passo(e.shiftKey?-10:-1); }
+  else if(k==='arrowright'){ e.preventDefault(); if(modoAtual!=='frame') modo('frame');
+                             else passo(e.shiftKey?10:1); }
+  else if(k==='pageup'){ e.preventDefault(); vizinho(-1); }
+  else if(k==='pagedown'){ e.preventDefault(); vizinho(1); }
+  else if(k==='enter'){ e.preventDefault(); avancar(); }
   else if(k==='a') aprovar();
-  else if(k==='s') salvar();
   else if(k==='z') desfazer();
-  else if(k==='f') modo(modoAtual==='frame'?'video':'frame');
   else if(k==='e'){ e.preventDefault(); reguaAlternar(); }
   else if(k==='r'){ e.preventDefault(); reguaRecolher(); }
   else if(k==='t'){ e.preventDefault(); reguaNomes(); }

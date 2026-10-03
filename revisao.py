@@ -56,6 +56,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -544,7 +545,11 @@ def editar(paths: Paths, uid: str, *, region: Optional[str] = None,
         raise RevisaoErro("este rotulo esta descartado. Use `reverter` antes de editar.")
 
     l = dict(reg["atual"])
-    fps = float(fps) if fps else fps_da_linha(l)
+    fps_atual = fps_da_linha(l)
+    fps_informado = fps is not None
+    fps = float(fps) if fps_informado else fps_atual
+    if not math.isfinite(fps) or fps <= 0:
+        raise RevisaoErro("FPS deve ser um numero maior que zero.")
     mudancas: list[str] = []
 
     if region:
@@ -584,6 +589,19 @@ def editar(paths: Paths, uid: str, *, region: Optional[str] = None,
             mudancas.append(f"{campo_f} {l.get(campo_f,'')} -> {valor}")
             l[campo_f] = str(valor)
             l[campo_t] = f"{valor / fps:.4f}"             # tempo derivado do frame
+
+    # O CSV nao guarda FPS em coluna propria: ele e deduzido de frames/tempos.
+    # Se o usuario corrigir so o FPS, atualizar os dois tempos torna a edicao
+    # persistente e mantem a proxima leitura coerente com o que foi salvo.
+    if fps_informado and abs(fps - round(fps_atual, 3)) > 0.001:
+        novos_tempos = {
+            campo_t: f"{int(num(l, campo_f)) / fps:.4f}"
+            for campo_f, campo_t in (("inicio_frame", "inicio_time_s"),
+                                     ("chute_frame", "chute_time_s"))
+        }
+        if any(l.get(campo) != valor for campo, valor in novos_tempos.items()):
+            l.update(novos_tempos)
+            mudancas.append(f"tempos recalculados com {fps:g} fps")
 
     if observations is not None and observations != l.get("observations", ""):
         mudancas.append("observations alterada")

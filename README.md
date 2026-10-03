@@ -50,6 +50,14 @@ só a Rotulação aparece; Validação e Painel surgem depois do primeiro pênal
 `F` marca chute · `Enter` salva · `E` régua das traves (4 cliques nos cantos do gol
 dividem-no nas 9 regiões) · `T` só os traços · `R` recolhe a régua.
 
+**Na Validação:** cada rótulo é conferido num passo a passo obrigatório, no
+centro da tela: **1** confirmar o frame de início · **2** confirmar o frame final
+(chute) · **3** assistir ao clip até o fim · **4** ver o vídeo (30 s a partir do
+início) com a régua das traves sobre o gol · **5** confirmar região e gol. Cada
+passo só libera o seguinte. `Enter` confirma o passo e abre o próximo; `←` `→`
+andam 1 frame (`Shift` = 10); `PgUp` `PgDn` trocam de rótulo. Se um frame mudar,
+o clip e os frames exportados são regerados a partir do vídeo original.
+
 ## Competição pelo nome da pasta
 
 A competição de cada vídeo sai do nome das pastas do caminho:
