@@ -75,6 +75,10 @@ Funciona igual; o que muda:
   `_revisao_manual/`); o índice de vídeos é refeito sozinho.
 - Os arquivos `._X.mp4` que o Finder cria em pendrives e HDs externos são
   ignorados em todas as telas.
+- **Aba de clip preta com o arquivo lá?** É o codec: clips cortados sem o ffmpeg
+  saem em MPEG-4 parte 2, que o Edge toca mas Chrome e Safari não.
+  `python3 converter_clips.py` conta quantos estão assim e, com `--aplicar`,
+  recorta todos de novo do vídeo original em H.264.
 
 ## Competição pelo nome da pasta
 
