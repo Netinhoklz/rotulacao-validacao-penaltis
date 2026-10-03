@@ -54,14 +54,14 @@ def codec_de(caminho: str) -> str:
 
 
 def fps_de(caminho: str) -> float:
-    r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
-                        "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", caminho],
-                       capture_output=True, text=True)
     try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", caminho],
+                           capture_output=True, text=True)
         num, den = r.stdout.strip().split("/")
         fps = float(num) / float(den)
         return fps if 5.0 < fps < 240.0 else 0.0
-    except (ValueError, ZeroDivisionError):
+    except (OSError, ValueError, ZeroDivisionError):
         return 0.0
 
 
@@ -103,8 +103,9 @@ def main() -> int:
     ap.add_argument("--videos", help="pasta dos videos originais (padrao: PASTA_VIDEOS do run.py)")
     ap.add_argument("--saida", help="pasta de saida com os labels.csv (padrao: PASTA_SAIDA do run.py)")
     ap.add_argument("--aplicar", action="store_true", help="converte de verdade (sem isto, so conta)")
-    ap.add_argument("--paralelo", type=int, default=max(2, (os.cpu_count() or 4) // 2),
-                    help="quantos ffmpeg ao mesmo tempo")
+    # 2 e o bastante: o libx264 ja usa varios nucleos, e cada ffmpeg decodificando
+    # 1080p pesa; com 8 em paralelo o Windows ficou sem memoria de paginacao (1455)
+    ap.add_argument("--paralelo", type=int, default=2, help="quantos ffmpeg ao mesmo tempo (padrao 2)")
     a = ap.parse_args()
 
     if not FFMPEG or not FFPROBE:
@@ -155,17 +156,23 @@ def main() -> int:
     feitos = {"recortado": 0, "transcodificado": 0, "falhou": 0}
     _fps: dict[str, float] = {}
 
+    erros: list[str] = []
+
     def converter(item):
         reg, clip = item
-        atual = reg["atual"]
-        video = indice.get(atual.get("video_file", ""))
-        if video and os.path.isfile(video):
-            fps = _fps.get(video) or fps_de(video) or R.fps_da_linha(atual)
-            _fps[video] = fps
-            ini, fim = int(R.num(atual, "inicio_frame")), int(R.num(atual, "chute_frame"))
-            if fim > ini and recortar(video, ini, fim, fps, clip):
-                return "recortado", clip
-        return ("transcodificado" if transcodificar(clip, clip) else "falhou"), clip
+        try:
+            atual = reg["atual"]
+            video = indice.get(atual.get("video_file", ""))
+            if video and os.path.isfile(video):
+                fps = _fps.get(video) or fps_de(video) or R.fps_da_linha(atual)
+                _fps[video] = fps
+                ini, fim = int(R.num(atual, "inicio_frame")), int(R.num(atual, "chute_frame"))
+                if fim > ini and recortar(video, ini, fim, fps, clip):
+                    return "recortado", clip
+            return ("transcodificado" if transcodificar(clip, clip) else "falhou"), clip
+        except Exception as e:                       # um clip com problema nao derruba o lote
+            erros.append(f"{os.path.basename(clip)}: {e}")
+            return "falhou", clip
 
     with ThreadPoolExecutor(a.paralelo) as ex:
         for i, (como, clip) in enumerate(ex.map(converter, fila), 1):
@@ -174,6 +181,10 @@ def main() -> int:
                 print(f"  {i}/{len(fila)}  ({time.time() - t0:.0f}s)")
     print(f"\nrecortados do original: {feitos['recortado']}  |  transcodificados: "
           f"{feitos['transcodificado']}  |  falharam: {feitos['falhou']}")
+    for e in erros[:10]:
+        print("  falha:", e)
+    if feitos["falhou"]:
+        print("Rode de novo: so os que faltam sao refeitos. Se o erro for de memoria, use --paralelo 1.")
     return 1 if feitos["falhou"] else 0
 
 
