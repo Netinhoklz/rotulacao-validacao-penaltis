@@ -816,18 +816,30 @@ def caminho_local(paths: Paths, caminho: str) -> str:
     """
     if not caminho:
         return ""
-    if os.path.isfile(caminho):
-        return os.path.abspath(caminho)
+    out_base = os.path.abspath(paths.output_base)
+    abs_caminho = os.path.abspath(caminho)
+
+    # 1. Se ja esta exatamente dentro da pasta de saida atual e existe:
+    if abs_caminho.startswith(out_base + os.sep) and os.path.isfile(abs_caminho):
+        return abs_caminho
+
+    # 2. Prioridade: busca dentro da pasta de saida ativa desta maquina/sessao
     partes = [p for p in re.split(r"[\\/]+", caminho) if p]
-    for n in (2, 3):
+    for n in (3, 2, 4):
         if len(partes) >= n:
-            cand = os.path.join(paths.output_base, *partes[-n:])
+            cand = os.path.join(out_base, *partes[-n:])
             if os.path.isfile(cand):
                 return cand
-    if len(partes) >= 3 and os.path.isdir(os.path.join(paths.output_base, partes[-3])):
-        return os.path.join(paths.output_base, *partes[-3:])     # com pasta de competicao
+
+    # 3. Se nao existe dentro de out_base, mas o caminho original existe no disco:
+    if os.path.isfile(abs_caminho):
+        return abs_caminho
+
+    # 4. Destino para gravacao futura se o arquivo ainda nao foi gerado:
+    if len(partes) >= 3 and os.path.isdir(os.path.join(out_base, partes[-3])):
+        return os.path.join(out_base, *partes[-3:])     # com pasta de competicao
     if len(partes) >= 2:
-        return os.path.join(paths.output_base, *partes[-2:])
+        return os.path.join(out_base, *partes[-2:])
     return ""
 
 

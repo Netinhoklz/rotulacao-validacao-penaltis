@@ -430,8 +430,12 @@ def _save_clip_cv2(video_path: str, start: int, end: int, out_path: str, fps: fl
     try:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        writer = None
+        for fourcc_tag in ("avc1", "H264", "mp4v"):
+            fourcc = cv2.VideoWriter_fourcc(*fourcc_tag)
+            writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+            if writer.isOpened():
+                break
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
         for _ in range(end - start + 1):
             ret, frame = cap.read()

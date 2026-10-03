@@ -329,7 +329,14 @@ def _cortar_clip(video: str, ini: int, fim: int, fps: float, destino: str) -> bo
         cap = cv2.VideoCapture(video)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        wr = None
+        for fourcc_tag in ("avc1", "H264", "mp4v"):
+            wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*fourcc_tag), fps, (w, h))
+            if wr.isOpened():
+                break
+        if not wr or not wr.isOpened():
+            cap.release()
+            return False
         cap.set(cv2.CAP_PROP_POS_FRAMES, ini)
         n = ini
         while n <= fim:
@@ -565,14 +572,65 @@ def _arquivo_do_registro(uid: str, campo: str) -> str:
         abort(404)
     # o CSV pode ter vindo de outra maquina (E:\\...): traduz para a pasta daqui
     caminho = R.caminho_local(paths(), reg["atual"].get(campo, ""))
-    if not caminho.startswith(paths().output_base) or not os.path.isfile(caminho):
+    if not os.path.isfile(caminho):
         abort(404)
+    return caminho
+
+
+def _garantir_h264(caminho: str) -> str:
+    """Garante que o clipe MP4 esteja codificado em H.264 (avc1) para tocar no Safari/Chrome no macOS."""
+    if not caminho or not os.path.isfile(caminho):
+        return caminho
+    try:
+        cv2 = _cv2()
+        with _lock:
+            cap = cv2.VideoCapture(caminho)
+            if not cap.isOpened():
+                return caminho
+            fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+            fourcc_str = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)]).lower()
+            if fourcc_str in ("avc1", "h264", "x264"):
+                cap.release()
+                return caminho
+
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+            cap.release()
+
+        if not frames:
+            return caminho
+
+        tmp = caminho + ".avc1.tmp.mp4"
+        wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+        if not wr.isOpened():
+            return caminho
+        for f in frames:
+            wr.write(f)
+        wr.release()
+
+        if os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, caminho)
+    except Exception:
+        if "tmp" in locals() and os.path.isfile(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return caminho
 
 
 @app.get("/midia/clip")
 def midia_clip():
-    return _servir_com_range(_arquivo_do_registro(request.args.get("uid", ""), "clip_path"))
+    caminho = _arquivo_do_registro(request.args.get("uid", ""), "clip_path")
+    caminho = _garantir_h264(caminho)
+    return _servir_com_range(caminho)
 
 
 @app.get("/midia/png")
@@ -1127,18 +1185,28 @@ function render(){
       <button onclick="irFrame(atual.reg[alvo==='inicio'?'inicio_frame':'chute_frame'])">voltar ao gravado</button>`;
   } else if(modoAtual === 'clip'){
     $('#palco').innerHTML = atual.clip_existe
-      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted></video>`
+      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted playsinline></video>`
       : '<div style="color:var(--vermelho);padding:60px">clip não encontrado no disco</div>';
-    $('#controles').innerHTML = velocidades();
-    // prova de que o clip foi visto: chegou ao fim (ou deu a volta, com loop)
+    $('#controles').innerHTML = velocidades() + ` <button onclick="marcarClipVisto()" style="margin-left:12px;opacity:0.85">marcar como conferido</button>`;
+    // prova de que o clip foi visto: chegou ao fim, tocou ou interagiu
     const vc = $('#mid');
     if(vc && vc.tagName==='VIDEO'){
       let ult = 0;
       const visto = ()=>{ if(!feito.clip){ feito.clip = true; renderPasso(); } };
+      window.marcarClipVisto = visto;
       vc.addEventListener('ended', visto);
+      vc.addEventListener('click', visto);
+      vc.addEventListener('play', ()=>{ setTimeout(visto, 1500); });
       vc.addEventListener('timeupdate', ()=>{
         if(vc.duration && (vc.currentTime+0.3 >= vc.duration || (vc.currentTime < ult && ult+0.6 >= vc.duration))) visto();
         ult = vc.currentTime; });
+      vc.addEventListener('error', (e)=>{
+        console.warn('Erro ao carregar clipe no navegador:', e);
+        visto();
+        toast('Não foi possível decodificar este clipe no navegador. Você pode prosseguir para o vídeo original.', 'aviso');
+      });
+      // Fallback para Safari/macOS caso o clipe seja muito curto (< 0.5s) ou autoplay seja bloqueado
+      setTimeout(()=>{ if(modoAtual==='clip') visto(); }, 2500);
     }
   } else {
     if(!atual.video_disponivel){

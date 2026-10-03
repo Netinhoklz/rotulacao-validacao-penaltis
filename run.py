@@ -9,14 +9,15 @@
 #   qualquer outro nome                          -> "outros"
 #   Windows: r"E:\base_videos_penaltis"   macOS: "/Users/seu_nome/base_videos_penaltis"
 #   (no Mac um HD externo fica em "/Volumes/NOME_DO_DISCO/...")
-PASTA_VIDEOS = r"E:\base_videos_penaltis"
+PASTA_VIDEOS = r"VIDEOS/"
 
 # Onde os rótulos (labels.csv), clips e frames são gravados. Criada se faltar.
-PASTA_SAIDA = r"E:\penaltis_rotulados"
+# PASTA_SAIDA = r"E:\penaltis_rotulados"
+PASTA_SAIDA = r"SAIDA/"
 
 # Cache da rotulação: uma cópia leve de cada vídeo, para o frame a frame ser
 # rápido. Qualquer pasta com espaço em disco; criada se faltar.
-PASTA_CACHE = r"E:\pasta_ref_mais_rapida"
+PASTA_CACHE = r"CACHE/"
 
 # Tela que abre no navegador: "rotulador", "validacao", "painel" ou "jogadores".
 ABRIR_EM = "rotulador"

@@ -35,6 +35,7 @@ from typing import Any, Optional
 from flask import Flask, Response, abort, jsonify, request, send_file
 
 import validador as V
+import revisao as R
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
@@ -55,6 +56,7 @@ def indice() -> dict[str, str]:
 
 def _linha_json(l: dict, i: int) -> dict:
     fps = V.fps_estimado(l) or V.FPS_ESPERADO
+    clip_caminho = R.caminho_local(paths(), l.get("clip_path", ""))
     return {
         "n": i,
         "row_id": V.row_id(l),
@@ -70,8 +72,8 @@ def _linha_json(l: dict, i: int) -> dict:
         "dur_s": round(V.duracao_s(l), 3),
         "dur_frames": V.duracao_frames(l),
         "fps": round(fps, 3),
-        "clip_existe": os.path.isfile(l.get("clip_path", "")),
-        "clip_nome": os.path.basename(l.get("clip_path", "")),
+        "clip_existe": os.path.isfile(clip_caminho),
+        "clip_nome": os.path.basename(clip_caminho or l.get("clip_path", "")),
     }
 
 
@@ -285,8 +287,8 @@ def midia_clip():
     alvo = next((l for l in linhas if V.row_id(l) == rid), None)
     if not alvo:
         abort(404)
-    caminho = os.path.abspath(alvo.get("clip_path", ""))
-    if not caminho.startswith(paths().output_base) or not os.path.isfile(caminho):
+    caminho = R.caminho_local(paths(), alvo.get("clip_path", ""))
+    if not os.path.isfile(caminho):
         abort(404)
     return _servir_com_range(caminho)
 

@@ -232,8 +232,12 @@ class Exporter:
             width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+            writer = None
+            for fourcc_tag in ("avc1", "H264", "mp4v"):
+                fourcc = cv2.VideoWriter_fourcc(*fourcc_tag)
+                writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+                if writer.isOpened():
+                    break
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
             for _ in range(end_frame - start_frame + 1):

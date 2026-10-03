@@ -5,4 +5,11 @@
 # Primeira vez: botao direito > Abrir (o Gatekeeper pede confirmacao). Se o
 # Finder reclamar de permissao, no Terminal:  chmod +x start.command
 cd "$(dirname "$0")" || exit 1
-python3 run.py "$@" || read -r -p "Deu erro acima. Enter para fechar."
+if [ -f "./env/bin/python3" ]; then
+    PY="./env/bin/python3"
+elif [ -f "./env/bin/python" ]; then
+    PY="./env/bin/python"
+else
+    PY="python3"
+fi
+"$PY" run.py "$@" || read -r -p "Deu erro acima. Enter para fechar."
