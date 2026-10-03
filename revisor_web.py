@@ -1163,12 +1163,12 @@ async function irEtapa(n){
     // frames corrigidos: grava (e regera o clip) antes de mostrá-lo
     if(haPendencias()){ manterEtapa = true; modoAtual = 'clip';
       const framesMudaram = frames.inicio!==atual.reg.inicio_frame || frames.chute!==atual.reg.chute_frame;
-      const versaoAntes = atual.reg.clip_versao;
+      const versaoAntes = atual.clip_versao;
       toast('Gravando e recortando o clip a partir do vídeo original…');
       if(!await salvar()){ manterEtapa = false; etapa = 2; irEtapa(2); return; }
       // o clip novo tem outra data de arquivo; se a data nao mudou, o que
       // esta na tela e o clip antigo e o revisor precisa saber disso
-      clipDesatualizado = framesMudaram && atual.reg.clip_versao === versaoAntes;
+      clipDesatualizado = framesMudaram && atual.clip_versao === versaoAntes;
       if(clipDesatualizado) toast('O clip NÃO foi regravado: a tela mostra o clip ANTIGO. Veja o motivo no aviso anterior.', 'erro');
       renderPasso(); }
     else modo('clip');
@@ -1229,7 +1229,7 @@ function render(){
       <button onclick="irFrame(atual.reg[alvo==='inicio'?'inicio_frame':'chute_frame'])">voltar ao gravado</button>`;
   } else if(modoAtual === 'clip'){
     $('#palco').innerHTML = atual.clip_existe
-      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.clip_versao||r.revisado_em||'')}" controls autoplay loop muted playsinline
+      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(atual.clip_versao||r.revisado_em||'')}" controls autoplay loop muted playsinline
            onerror="clipFalhou()"></video>`
       : '<div style="color:var(--vermelho);padding:60px">clip não encontrado no disco</div>';
     $('#controles').innerHTML = velocidades() + ` <button onclick="marcarClipVisto()" style="margin-left:12px;opacity:0.85">marcar como conferido</button>`;
