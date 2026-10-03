@@ -58,6 +58,22 @@ passo só libera o seguinte. `Enter` confirma o passo e abre o próximo; `←` `
 andam 1 frame (`Shift` = 10); `PgUp` `PgDn` trocam de rótulo. Se um frame mudar,
 o clip e os frames exportados são regerados a partir do vídeo original.
 
+## macOS (MacBook M1/M2)
+
+Funciona igual; o que muda:
+
+- Use `python3` (`pip3 install -r requirements.txt` e `python3 run.py`) ou dê dois
+  cliques no `start.command` (na primeira vez: botão direito → Abrir).
+- As pastas no `run.py` são caminhos do Mac: `/Users/seu_nome/base_videos_penaltis`,
+  ou `/Volumes/NOME_DO_DISCO/...` para um HD externo. `~/...` também vale.
+- `brew install ffmpeg` deixa a navegação mais rápida e os clips menores.
+- Um `labels.csv` feito no Windows guarda caminhos `E:\...` para clips e frames.
+  No Mac eles são procurados na mesma posição dentro de `PASTA_SAIDA`, então
+  basta copiar a pasta de saída inteira (com `clips/`, `frames/` e
+  `_revisao_manual/`); o índice de vídeos é refeito sozinho.
+- Os arquivos `._X.mp4` que o Finder cria em pendrives e HDs externos são
+  ignorados em todas as telas.
+
 ## Competição pelo nome da pasta
 
 A competição de cada vídeo sai do nome das pastas do caminho:

@@ -7,6 +7,8 @@
 #   ...copa_do_brasil...                         -> Copa do Brasil
 #   ...brasileirao...  ou  videos_penaltis_2023  -> Brasileirão
 #   qualquer outro nome                          -> "outros"
+#   Windows: r"E:\base_videos_penaltis"   macOS: "/Users/seu_nome/base_videos_penaltis"
+#   (no Mac um HD externo fica em "/Volumes/NOME_DO_DISCO/...")
 PASTA_VIDEOS = r"E:\base_videos_penaltis"
 
 # Onde os rótulos (labels.csv), clips e frames são gravados. Criada se faltar.
@@ -127,9 +129,11 @@ def resolver_pastas(videos: Optional[str], saida: Optional[str],
     variavel no codigo ficaria sem entender por que a pasta nao mudou.
     """
     def escolher(cli, nome, valor):
+        # expanduser: "~/videos" funciona no macOS/Linux
         if cli:
-            return os.path.abspath(cli), "linha de comando"
-        return os.path.abspath(valor), f"variavel {nome} (run.py, linha {linha_da_variavel(nome)})"
+            return os.path.abspath(os.path.expanduser(cli)), "linha de comando"
+        return (os.path.abspath(os.path.expanduser(valor)),
+                f"variavel {nome} (run.py, linha {linha_da_variavel(nome)})")
 
     return {
         "videos": escolher(videos, "PASTA_VIDEOS", PASTA_VIDEOS),
@@ -147,6 +151,7 @@ def contar_videos(pasta: str) -> int:
     """
     jogos: Set[Tuple[str, str]] = set()
     for raiz, _, arquivos in os.walk(pasta):
+        arquivos = [a for a in arquivos if not a.startswith("._")]   # metadados do macOS
         finais = {a.rsplit(".", 1)[0] for a in arquivos
                   if a.lower().endswith(EXT_VIDEO) and not re.search(r"\.(temp|f\d+)\.", a.lower())}
         for a in arquivos:

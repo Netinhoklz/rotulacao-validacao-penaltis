@@ -58,6 +58,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import sys
@@ -791,6 +792,45 @@ def exportar(paths: Paths) -> dict:
 # ---------------------------------------------------------------------------
 # Indice de videos
 # ---------------------------------------------------------------------------
+def eh_video(nome: str) -> bool:
+    """
+    Arquivo de video de verdade.
+
+    Ignora os "._X.mp4" que o macOS espalha em pendrives e HDs externos: sao
+    metadados (AppleDouble), nao video, mas terminam em .mp4 e entrariam na
+    fila como um jogo que nunca abre.
+    """
+    return nome.lower().endswith(VIDEO_EXT) and not nome.startswith("._")
+
+
+def caminho_local(paths: Paths, caminho: str) -> str:
+    """
+    Caminho de clip/frame do CSV traduzido para esta maquina.
+
+    O labels.csv guarda o caminho absoluto de quem rotulou
+    (E:\\penaltis_rotulados\\clips\\x.mp4). Em outra maquina - um Mac, outra
+    letra de disco - ele nao existe, mas o arquivo esta na mesma posicao
+    relativa dentro da pasta de saida: <saida>/[competicao/]clips|frames/x.
+    Devolve o caminho que existe aqui; se nao existir em lugar nenhum, o
+    lugar certo para grava-lo; "" se o campo esta vazio.
+    """
+    if not caminho:
+        return ""
+    if os.path.isfile(caminho):
+        return os.path.abspath(caminho)
+    partes = [p for p in re.split(r"[\\/]+", caminho) if p]
+    for n in (2, 3):
+        if len(partes) >= n:
+            cand = os.path.join(paths.output_base, *partes[-n:])
+            if os.path.isfile(cand):
+                return cand
+    if len(partes) >= 3 and os.path.isdir(os.path.join(paths.output_base, partes[-3])):
+        return os.path.join(paths.output_base, *partes[-3:])     # com pasta de competicao
+    if len(partes) >= 2:
+        return os.path.join(paths.output_base, *partes[-2:])
+    return ""
+
+
 def indexar_videos(paths: Paths, source_dir: str, recriar: bool = False) -> dict[str, str]:
     """Mapa nome_do_arquivo -> caminho completo, cacheado em disco."""
     if os.path.isfile(paths.indice_vids) and not recriar:
@@ -813,7 +853,7 @@ def indexar_videos(paths: Paths, source_dir: str, recriar: bool = False) -> dict
     indice: dict[str, str] = {}
     for raiz, _, arquivos in os.walk(source_dir):
         for nome in arquivos:
-            if nome.lower().endswith(VIDEO_EXT):
+            if eh_video(nome):
                 indice.setdefault(nome, os.path.join(raiz, nome))
     paths.criar_dirs()
     _guard(paths, paths.indice_vids)

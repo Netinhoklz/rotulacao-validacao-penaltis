@@ -564,6 +564,8 @@ def _collect_all_videos(directory: str) -> list[dict]:
         for fname in sorted(files):
             if not fname.lower().endswith(SUPPORTED_EXT):
                 continue
+            if fname.startswith("._"):
+                continue                          # metadados AppleDouble do macOS, nao video
             if Path(fname).stem.lower().endswith(".temp"):
                 continue                          # juncao incompleta do yt-dlp
             full_path = os.path.join(root, fname)

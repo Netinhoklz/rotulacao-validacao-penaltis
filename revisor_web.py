@@ -203,9 +203,9 @@ def _detalhe(r: dict, base: R.Base) -> dict:
             "chute_frame":  int(R.num(o, "chute_frame")),
         },
         "video_disponivel": bool(video_path),
-        "clip_existe":      os.path.isfile(a.get("clip_path", "")),
-        "png_inicio":       os.path.isfile(a.get("frame_inicio_path", "")),
-        "png_chute":        os.path.isfile(a.get("frame_chute_path", "")),
+        "clip_existe":      os.path.isfile(R.caminho_local(paths(), a.get("clip_path", ""))),
+        "png_inicio":       os.path.isfile(R.caminho_local(paths(), a.get("frame_inicio_path", ""))),
+        "png_chute":        os.path.isfile(R.caminho_local(paths(), a.get("frame_chute_path", ""))),
         "irmaos":           sorted(irmaos, key=lambda x: x["chute_time_s"]),
         "regioes":          [{"code": c, "label": R.REGION_LABELS[c]} for c in R.REGION_LABELS],
         "cameras":          sorted(R.VALID_CAMERAS),
@@ -387,7 +387,7 @@ def _regerar_midia(uid: str) -> list[str]:
         ("frame inicio", "frame_inicio_path", lambda d: _gravar_frame(video, ini, d)),
         ("frame chute",  "frame_chute_path",  lambda d: _gravar_frame(video, fim, d)),
     ):
-        destino = a.get(campo, "")
+        destino = R.caminho_local(paths(), a.get(campo, ""))
         if not _dentro_da_saida(destino):
             continue                             # rotulo sem midia exportada
         try:
@@ -563,7 +563,8 @@ def _arquivo_do_registro(uid: str, campo: str) -> str:
         reg = base.get(uid)
     except R.RevisaoErro:
         abort(404)
-    caminho = os.path.abspath(reg["atual"].get(campo, ""))
+    # o CSV pode ter vindo de outra maquina (E:\\...): traduz para a pasta daqui
+    caminho = R.caminho_local(paths(), reg["atual"].get(campo, ""))
     if not caminho.startswith(paths().output_base) or not os.path.isfile(caminho):
         abort(404)
     return caminho

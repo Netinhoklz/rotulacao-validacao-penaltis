@@ -1,5 +1,7 @@
 # texto sempre em LF no repositorio; o .bat em CRLF, que e o que o cmd.exe espera
 * text=auto eol=lf
 *.bat text eol=crlf
+*.command text eol=lf
+*.sh text eol=lf
 *.png binary
 *.svg text

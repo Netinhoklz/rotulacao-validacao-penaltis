@@ -75,7 +75,7 @@ def _indice() -> dict[str, str]:
     if not idx and os.path.isdir(_ctx["source_dir"]):
         for raiz, _, arquivos in os.walk(_ctx["source_dir"]):
             for nome in arquivos:
-                if nome.lower().endswith(R.VIDEO_EXT):
+                if R.eh_video(nome):
                     idx.setdefault(nome, os.path.join(raiz, nome))
     _ctx["indice"] = idx
     return idx
