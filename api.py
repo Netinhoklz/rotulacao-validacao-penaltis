@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import io
 import shutil
+import sys
 import subprocess
 import threading
 import datetime
@@ -423,15 +424,24 @@ def _save_frame_file(video_path: str, frame_idx: int, out_path: str) -> bool:
     return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
 
 
+# Codecs a tentar, em ordem, quando NAO ha ffmpeg. "mp4v" (MPEG-4 parte 2) e o
+# que o OpenCV grava em qualquer lugar, mas Chrome e Safari NAO tocam: o clip
+# existe e a tela fica preta. No macOS o OpenCV grava H.264 ("avc1"/"H264")
+# pelo AVFoundation, que o navegador toca; no Windows o "avc1" exige a DLL do
+# OpenH264 e, sem ela, isOpened() mente (True) e sai arquivo vazio - por isso
+# ele so entra na lista no macOS.
+CLIP_FOURCCS_SEM_FFMPEG = ("avc1", "H264", "mp4v") if sys.platform == "darwin" else ("mp4v",)
+
+
 def _save_clip_cv2(video_path: str, start: int, end: int, out_path: str, fps: float):
-    """Fallback: extrai o clip com OpenCV/mp4v (usado se ffmpeg indisponivel)."""
+    """Fallback: extrai o clip com OpenCV (usado se ffmpeg indisponivel)."""
     cap = cv2.VideoCapture(video_path)
     writer = None
     try:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         writer = None
-        for fourcc_tag in ("avc1", "H264", "mp4v"):
+        for fourcc_tag in CLIP_FOURCCS_SEM_FFMPEG:
             fourcc = cv2.VideoWriter_fourcc(*fourcc_tag)
             writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
             if writer.isOpened():

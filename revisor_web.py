@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import webbrowser
 from typing import Any, Optional
@@ -297,6 +298,9 @@ def api_editar():
 # Regeracao do clip e dos frames exportados a partir do frame corrigido
 # ---------------------------------------------------------------------------
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
+# Sem ffmpeg o clip sai do OpenCV: "mp4v" nao toca no Chrome/Safari (tela
+# preta); no macOS "avc1" (H.264 via AVFoundation) toca. Mesma regra do api.py.
+CLIP_FOURCC_SEM_FFMPEG = "avc1" if sys.platform == "darwin" else "mp4v"
 
 
 def _dentro_da_saida(caminho: str) -> bool:
@@ -329,6 +333,7 @@ def _cortar_clip(video: str, ini: int, fim: int, fps: float, destino: str) -> bo
         cap = cv2.VideoCapture(video)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+<<<<<<< HEAD
         wr = None
         for fourcc_tag in ("avc1", "H264", "mp4v"):
             wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*fourcc_tag), fps, (w, h))
@@ -337,6 +342,9 @@ def _cortar_clip(video: str, ini: int, fim: int, fps: float, destino: str) -> bo
         if not wr or not wr.isOpened():
             cap.release()
             return False
+=======
+        wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*CLIP_FOURCC_SEM_FFMPEG), fps, (w, h))
+>>>>>>> main
         cap.set(cv2.CAP_PROP_POS_FRAMES, ini)
         n = ini
         while n <= fim:
@@ -1126,6 +1134,7 @@ async function irEtapa(n){
   else if(n===3){
     // frames corrigidos: grava (e regera o clip) antes de mostrá-lo
     if(haPendencias()){ manterEtapa = true; modoAtual = 'clip';
+      toast('Gravando e recortando o clip a partir do vídeo original…');
       if(!await salvar()){ manterEtapa = false; etapa = 2; irEtapa(2); } }
     else modo('clip');
   }
@@ -1185,7 +1194,12 @@ function render(){
       <button onclick="irFrame(atual.reg[alvo==='inicio'?'inicio_frame':'chute_frame'])">voltar ao gravado</button>`;
   } else if(modoAtual === 'clip'){
     $('#palco').innerHTML = atual.clip_existe
+<<<<<<< HEAD
       ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted playsinline></video>`
+=======
+      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted
+           onerror="clipFalhou()"></video>`
+>>>>>>> main
       : '<div style="color:var(--vermelho);padding:60px">clip não encontrado no disco</div>';
     $('#controles').innerHTML = velocidades() + ` <button onclick="marcarClipVisto()" style="margin-left:12px;opacity:0.85">marcar como conferido</button>`;
     // prova de que o clip foi visto: chegou ao fim, tocou ou interagiu
@@ -1237,6 +1251,15 @@ function render(){
   if(mid) mid.addEventListener(mid.tagName==='VIDEO'?'loadeddata':'load',
                                reguaDesenhar,{once:true});
   reguaDesenhar();
+}
+// o arquivo existe mas o <video> nao decodifica: quase sempre clip gravado
+// sem ffmpeg (codec mp4v). Regerar com ffmpeg instalado resolve.
+function clipFalhou(){
+  $('#palco').innerHTML = `<div style="color:var(--vermelho);padding:40px;line-height:1.6;max-width:560px">
+    O navegador não conseguiu tocar este clip.<br>
+    <span style="color:var(--txt2)">Se ele foi gerado sem o <b>ffmpeg</b> (codec mp4v), instale o ffmpeg
+    (macOS: <code>brew install ffmpeg</code>) e volte ao passo 2: confirmar o frame final
+    com qualquer alteração regera o clip.</span></div>`;
 }
 const velocidades = () => `<button onclick="vel(0.25)">0.25x</button>
   <button onclick="vel(0.5)">0.5x</button><button onclick="vel(1)">1x</button>`;
