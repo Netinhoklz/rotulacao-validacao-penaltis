@@ -66,7 +66,9 @@ Funciona igual; o que muda:
   cliques no `start.command` (na primeira vez: botão direito → Abrir).
 - As pastas no `run.py` são caminhos do Mac: `/Users/seu_nome/base_videos_penaltis`,
   ou `/Volumes/NOME_DO_DISCO/...` para um HD externo. `~/...` também vale.
-- `brew install ffmpeg` deixa a navegação mais rápida e os clips menores.
+- `brew install ffmpeg`: sem ele os clips saem do OpenCV (maiores e mais lentos de
+  gerar) e, fora do macOS, num codec que o navegador não toca — a aba de clip
+  fica preta. O `run.py` avisa na partida se o ffmpeg não está no PATH.
 - Um `labels.csv` feito no Windows guarda caminhos `E:\...` para clips e frames.
   No Mac eles são procurados na mesma posição dentro de `PASTA_SAIDA`, então
   basta copiar a pasta de saída inteira (com `clips/`, `frames/` e

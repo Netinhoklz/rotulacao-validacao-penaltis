@@ -99,6 +99,17 @@ def checar_dependencias(com_rotulador: bool) -> bool:
         print(f"\n  Instale tudo de uma vez com:\n"
               f"      {sys.executable} -m pip install -r requirements.txt\n")
         return False
+    # ffmpeg e opcional, mas sem ele o clip sai do OpenCV e, fora do macOS,
+    # num codec que o navegador nao toca: a aba de clip fica preta.
+    if shutil.which("ffmpeg"):
+        print("  ok      ffmpeg")
+    else:
+        print("  AVISO   ffmpeg nao encontrado no PATH: os clips serao gravados pelo OpenCV")
+        if sys.platform == "darwin":
+            print("          (H.264, toca no navegador). Para clips menores: brew install ffmpeg")
+        else:
+            print("          em mp4v, que o navegador NAO toca (aba de clip preta).")
+            print("          Windows: winget install ffmpeg  ou coloque ffmpeg.exe no PATH")
     print()
     return True
 
