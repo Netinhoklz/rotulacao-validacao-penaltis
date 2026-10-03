@@ -52,6 +52,15 @@ import revisao as R
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
+
+@app.after_request
+def _sem_cache(resp):
+    # o registro muda a cada save e clip/frames exportados sao regravados no
+    # mesmo caminho: o navegador nao pode reaproveitar nada disso
+    if request.path.startswith(("/api/", "/midia/clip", "/midia/png")):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
 _ctx: dict[str, Any] = {}          # paths + source_dir + indice de videos
 
 
@@ -157,6 +166,15 @@ def _fps_do_video(caminho: Optional[str]) -> float:
     return _fps_video[caminho]
 
 
+def _versao_arquivo(caminho: str) -> str:
+    """Carimbo que muda a cada regravacao: vai na URL do clip para furar o
+    cache do navegador (Safari e Chrome guardam midia pela URL)."""
+    try:
+        return str(int(os.path.getmtime(caminho) * 1000))
+    except OSError:
+        return ""
+
+
 def _detalhe(r: dict, base: R.Base) -> dict:
     a, o = r["atual"], r["original"]
     video_path = indice().get(a.get("video_file", ""))
@@ -205,6 +223,7 @@ def _detalhe(r: dict, base: R.Base) -> dict:
         },
         "video_disponivel": bool(video_path),
         "clip_existe":      os.path.isfile(R.caminho_local(paths(), a.get("clip_path", ""))),
+        "clip_versao":      _versao_arquivo(R.caminho_local(paths(), a.get("clip_path", ""))),
         "png_inicio":       os.path.isfile(R.caminho_local(paths(), a.get("frame_inicio_path", ""))),
         "png_chute":        os.path.isfile(R.caminho_local(paths(), a.get("frame_chute_path", ""))),
         "irmaos":           sorted(irmaos, key=lambda x: x["chute_time_s"]),
@@ -299,8 +318,9 @@ def api_editar():
 # ---------------------------------------------------------------------------
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
 # Sem ffmpeg o clip sai do OpenCV: "mp4v" nao toca no Chrome/Safari (tela
-# preta); no macOS "avc1" (H.264 via AVFoundation) toca. Mesma regra do api.py.
-CLIP_FOURCC_SEM_FFMPEG = "avc1" if sys.platform == "darwin" else "mp4v"
+# preta); no macOS "avc1"/"H264" (via AVFoundation) tocam. No Windows o avc1
+# diz isOpened() sem a DLL do OpenH264 e sai vazio. Mesma regra do api.py.
+CLIP_FOURCCS_SEM_FFMPEG = ("avc1", "H264", "mp4v") if sys.platform == "darwin" else ("mp4v",)
 
 
 def _dentro_da_saida(caminho: str) -> bool:
@@ -333,18 +353,14 @@ def _cortar_clip(video: str, ini: int, fim: int, fps: float, destino: str) -> bo
         cap = cv2.VideoCapture(video)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-<<<<<<< HEAD
         wr = None
-        for fourcc_tag in ("avc1", "H264", "mp4v"):
+        for fourcc_tag in CLIP_FOURCCS_SEM_FFMPEG:
             wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*fourcc_tag), fps, (w, h))
             if wr.isOpened():
                 break
         if not wr or not wr.isOpened():
             cap.release()
             return False
-=======
-        wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*CLIP_FOURCC_SEM_FFMPEG), fps, (w, h))
->>>>>>> main
         cap.set(cv2.CAP_PROP_POS_FRAMES, ini)
         n = ini
         while n <= fim:
@@ -402,9 +418,18 @@ def _regerar_midia(uid: str) -> list[str]:
         ("frame inicio", "frame_inicio_path", lambda d: _gravar_frame(video, ini, d)),
         ("frame chute",  "frame_chute_path",  lambda d: _gravar_frame(video, fim, d)),
     ):
+        # mesmo caminho que /midia/clip e /midia/png servem: se o arquivo ja
+        # existe, e la que ele e sobrescrito (ainda que fora da pasta de saida,
+        # como num CSV vindo de outra maquina); se ainda nao existe, so nasce
+        # dentro da pasta de saida. Pular em silencio aqui era o que deixava a
+        # aba de clip mostrando o clip ANTIGO depois de ajustar o frame.
         destino = R.caminho_local(paths(), a.get(campo, ""))
-        if not _dentro_da_saida(destino):
-            continue                             # rotulo sem midia exportada
+        if not destino:
+            falhou.append(f"{rotulo} (rotulo sem caminho)")
+            continue
+        if not os.path.isfile(destino) and not _dentro_da_saida(destino):
+            falhou.append(f"{rotulo} (fora da pasta de saida: {destino})")
+            continue
         try:
             os.makedirs(os.path.dirname(destino), exist_ok=True)
             (feito if acao(destino) else falhou).append(rotulo)
@@ -895,6 +920,7 @@ let itens = [], atual = null, modoAtual = 'frame', frameAtual = 0, limite = 300;
 // clicou região e gol). Nada disso é gravado: zera ao abrir outro rótulo.
 let etapa = 1, alvo = 'inicio', conferindo = false, manterEtapa = false;
 let feito = {clip:false, regua:false, regiao:false, gol:false};
+let clipDesatualizado = false;   // frames mudaram mas o clip nao foi regravado
 let statusGlobal = {}, filtroRegiao = '', sel = {region:'', gol:false};
 let frames = {inicio:0, chute:0, fps:30};
 
@@ -1021,7 +1047,7 @@ async function abrir(uid){
   const r = atual.reg;
   frames = {inicio:r.inicio_frame, chute:r.chute_frame, fps:r.fps};
   if(!manterEtapa){ etapa = 1; alvo = 'inicio'; conferindo = false; modoAtual = 'frame'; frameAtual = r.inicio_frame;
-    feito = {clip:false, regua:false, regiao:false, gol:false}; }
+    feito = {clip:false, regua:false, regiao:false, gol:false}; clipDesatualizado = false; }
   else if(modoAtual === 'frame') frameAtual = frames[alvo];
   manterEtapa = false;
   sel = {region: r.region, gol: r.is_goal};
@@ -1079,9 +1105,11 @@ const PASSOS = [{t:'Frame de início', curto:'Início'}, {t:'Frame final (chute)
 function instrucao(vis){
   if(vis===1) return 'Este é o <b>primeiro frame da cobrança</b> — o cobrador parado, antes da corrida? Se não for, ande com <kbd>←</kbd> <kbd>→</kbd> (Shift = 10) até ele. Quando estiver certo, clique em Confirmo.';
   if(vis===2) return 'Este é o <b>frame do chute</b> — a bola saindo do pé? Se não for, ande com <kbd>←</kbd> <kbd>→</kbd> até ele. Quando estiver certo, clique em Confirmo.';
-  if(vis===3) return atual.clip_existe
+  if(vis===3) return (clipDesatualizado
+    ? '<span style="color:var(--vermelho)"><b>Atenção:</b> o clip <b>não foi regravado</b> — este é o clip antigo, com os frames anteriores. Veja o aviso vermelho (falta ffmpeg? pasta errada?) e confira pelo vídeo no passo 4.</span><br>' : '')
+    + (atual.clip_existe
     ? 'Este clip vai do início ao final que você confirmou. <b>Assista até o fim</b>: mostra a cobrança inteira, do cobrador parado até o chute?'
-    : 'O clip deste rótulo não existe no disco. Confirme para seguir ao vídeo.';
+    : 'O clip deste rótulo não existe no disco. Confirme para seguir ao vídeo.');
   if(vis===4) return 'Veja <b>onde a bola foi</b>: o vídeo começa no início da cobrança e para sozinho 30 s depois. Aperte <kbd>E</kbd> e clique nas <b>4 traves</b> para colocar a grade do gol sobre a imagem.';
   return 'Com a grade sobre o gol, confirme <b>onde a bola foi</b> e <b>se foi gol</b> — mesmo que já esteja certo, clique nos dois.';
 }
@@ -1134,8 +1162,15 @@ async function irEtapa(n){
   else if(n===3){
     // frames corrigidos: grava (e regera o clip) antes de mostrá-lo
     if(haPendencias()){ manterEtapa = true; modoAtual = 'clip';
+      const framesMudaram = frames.inicio!==atual.reg.inicio_frame || frames.chute!==atual.reg.chute_frame;
+      const versaoAntes = atual.reg.clip_versao;
       toast('Gravando e recortando o clip a partir do vídeo original…');
-      if(!await salvar()){ manterEtapa = false; etapa = 2; irEtapa(2); } }
+      if(!await salvar()){ manterEtapa = false; etapa = 2; irEtapa(2); return; }
+      // o clip novo tem outra data de arquivo; se a data nao mudou, o que
+      // esta na tela e o clip antigo e o revisor precisa saber disso
+      clipDesatualizado = framesMudaram && atual.reg.clip_versao === versaoAntes;
+      if(clipDesatualizado) toast('O clip NÃO foi regravado: a tela mostra o clip ANTIGO. Veja o motivo no aviso anterior.', 'erro');
+      renderPasso(); }
     else modo('clip');
   }
   else if(modoAtual!=='video') modo('video');
@@ -1194,12 +1229,8 @@ function render(){
       <button onclick="irFrame(atual.reg[alvo==='inicio'?'inicio_frame':'chute_frame'])">voltar ao gravado</button>`;
   } else if(modoAtual === 'clip'){
     $('#palco').innerHTML = atual.clip_existe
-<<<<<<< HEAD
-      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted playsinline></video>`
-=======
-      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.revisado_em||'')}" controls autoplay loop muted
+      ? `<video id="mid" src="/midia/clip?uid=${uid}&v=${encodeURIComponent(r.clip_versao||r.revisado_em||'')}" controls autoplay loop muted playsinline
            onerror="clipFalhou()"></video>`
->>>>>>> main
       : '<div style="color:var(--vermelho);padding:60px">clip não encontrado no disco</div>';
     $('#controles').innerHTML = velocidades() + ` <button onclick="marcarClipVisto()" style="margin-left:12px;opacity:0.85">marcar como conferido</button>`;
     // prova de que o clip foi visto: chegou ao fim, tocou ou interagiu
@@ -1554,7 +1585,9 @@ async function salvar(){
         // recalculados com a taxa certa, sem mexer em quem só corrigiu região
         fps: framesMudaram ? frames.fps : null,
         observations: $('#ed-obs').value, nota: $('#ed-nota').value})});
-    toast('salvo: ' + r.mudancas.join(' · '), 'bom');
+    const ruins = r.mudancas.filter(m => /FALHOU|nao regerada/i.test(m));
+    toast('salvo: ' + r.mudancas.join(' · '), ruins.length ? 'erro' : 'bom');
+    if(ruins.length) console.error('regravacao de midia:', ruins);
     manterEtapa = true;
     const uid = atual.reg.uid; await carregar(true); await abrir(uid);
     return true;
